@@ -47,18 +47,6 @@ private val DarkColors = darkColorScheme(
     surfaceContainer = ResonanceTokens.Color.surfaceContainer,
     surfaceContainerHigh = ResonanceTokens.Color.surfaceContainerHigh,
     surfaceContainerHighest = ResonanceTokens.Color.surfaceContainerHighest,
-    primaryFixed = ResonanceTokens.Color.primaryFixed,
-    primaryFixedDim = ResonanceTokens.Color.primaryFixedDim,
-    onPrimaryFixed = Color.White,
-    onPrimaryFixedVariant = Color.White,
-    secondaryFixed = ResonanceTokens.Color.secondaryFixed,
-    secondaryFixedDim = ResonanceTokens.Color.secondaryFixedDim,
-    onSecondaryFixed = Color.White,
-    onSecondaryFixedVariant = Color.White,
-    tertiaryFixed = ResonanceTokens.Color.tertiaryFixed,
-    tertiaryFixedDim = ResonanceTokens.Color.tertiaryFixedDim,
-    onTertiaryFixed = Color.White,
-    onTertiaryFixedVariant = Color.White,
 )
 
 private val ExpressiveShapes = Shapes(
