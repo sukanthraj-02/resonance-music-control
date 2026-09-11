@@ -22,6 +22,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import androidx.core.content.ContextCompat
+import androidx.core.view.doOnPreDraw
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
@@ -74,6 +75,9 @@ class ResonanceAccessibilityService : AccessibilityService() {
     private val isExiting = mutableStateOf(false)
     private var overlayView: ComposeView? = null
     private var overlayOwner: OverlayLifecycleOwner? = null
+    private var outgoingOverlayView: ComposeView? = null
+    private var outgoingOverlayOwner: OverlayLifecycleOwner? = null
+    private var overlayTransitioning = false
     private var receiverRegistered = false
     private var volumeObserverRegistered = false
     private var screenInteractive = false
@@ -82,6 +86,7 @@ class ResonanceAccessibilityService : AccessibilityService() {
     private var customPlayerExpanded = false
     private var overlayLayoutParams: WindowManager.LayoutParams? = null
     private var callResumeAttempts = 0
+    private var keyguardSettleAttempts = 0
 
     private val removeOverlay = Runnable(::removeOverlayNow)
     private val reevaluateOverlay = Runnable(::updateOverlayVisibility)
@@ -102,31 +107,53 @@ class ResonanceAccessibilityService : AccessibilityService() {
                 Intent.ACTION_SCREEN_OFF -> {
                     screenInteractive = false
                     mainHandler.removeCallbacks(resumeAfterCall)
+                    mainHandler.removeCallbacks(reevaluateOverlay)
                     callResumeAttempts = 0
+                    keyguardSettleAttempts = 0
                     dismissedForCurrentLock = false
-                    keepOverlayWarm = overlayView != null
-                    collapseCustomPlayer()
-                    suspendOverlay()
+                    // Keep a small launcher composed while the display is off. That means it is
+                    // ready before the keyguard starts drawing on the next wake, rather than
+                    // paying the first-Compose cost after the lock screen is already visible.
+                    if (customPlayerExpanded || overlayTransitioning) removeOverlayNow()
+                    keepOverlayWarm = LockScreenPreferences.isEnabled(this@ResonanceAccessibilityService)
+                    if (keepOverlayWarm) {
+                        suspendOverlay()
+                        prewarmOverlay()
+                    } else {
+                        suspendOverlay()
+                    }
                 }
 
                 Intent.ACTION_SCREEN_ON -> {
                     screenInteractive = true
                     dismissedForCurrentLock = false
-                    keepOverlayWarm = LockScreenPreferences.isEnabled(this@ResonanceAccessibilityService) &&
-                        isKeyguardLocked()
+                    keyguardSettleAttempts = 0
+                    // KeyguardManager can report false for several frames after SCREEN_ON even
+                    // though the device is waking directly to the lock screen. Keep the already
+                    // composed launcher warm during that hand-off instead of tearing it down.
+                    keepOverlayWarm = LockScreenPreferences.isEnabled(this@ResonanceAccessibilityService)
                     if (keepOverlayWarm) prewarmOverlay()
-                    // Re-estimate the position from the MediaSession's monotonic time anchor
-                    // before attaching a new visual tree after the display has been off.
-                    MediaSessionMonitor.refreshSessions()
+                    // Use the warm, previously-known state for an instant launcher reveal. The
+                    // controller refresh follows on the next main-loop turn and reconciles any
+                    // state that changed while the display was off.
                     updateOverlayVisibility()
+                    mainHandler.post {
+                        MediaSessionMonitor.refreshSessions()
+                        updateOverlayVisibility()
+                    }
                     // A few OEMs update KeyguardManager just after ACTION_SCREEN_ON.
                     mainHandler.removeCallbacks(reevaluateOverlay)
                     mainHandler.postDelayed(reevaluateOverlay, KEYGUARD_SETTLE_MS)
                 }
 
                 Intent.ACTION_USER_PRESENT -> {
+                    // The launcher is only valid on the keyguard. Removing it immediately
+                    // avoids the small FAB flashing over the first unlocked frame while the
+                    // old exit animation is still running.
                     dismissedForCurrentLock = true
-                    hideOverlay(animate = true)
+                    keyguardSettleAttempts = 0
+                    mainHandler.removeCallbacks(reevaluateOverlay)
+                    removeOverlayNow()
                 }
 
                 LockScreenPreferences.ACTION_AUTOMATIC_PLAYER_CHANGED -> {
@@ -292,14 +319,16 @@ class ResonanceAccessibilityService : AccessibilityService() {
 
         val mediaState = MediaSessionMonitor.state.value
         val automaticPlayer = LockScreenPreferences.isAutomaticPlayerEnabled(this)
+        val keyguardLocked = isKeyguardLocked()
         val shouldShow =
             screenInteractive &&
                 !dismissedForCurrentLock &&
-                isKeyguardLocked() &&
+                keyguardLocked &&
                 LockScreenPreferences.isEnabled(this) &&
                 mediaState.isLockScreenEligible &&
                 (!automaticPlayer || mediaState.isPlaybackActive)
         if (shouldShow) {
+            keyguardSettleAttempts = 0
             showOverlay()
         } else if (
             keepOverlayWarm &&
@@ -310,14 +339,25 @@ class ResonanceAccessibilityService : AccessibilityService() {
         } else if (
             keepOverlayWarm &&
                 screenInteractive &&
-                isKeyguardLocked() &&
+                !dismissedForCurrentLock &&
                 LockScreenPreferences.isEnabled(this)
         ) {
+            // Preserve the prewarmed composition during Android's short screen-on/keyguard
+            // race. Poll rather than waiting for an unrelated media callback, so the FAB becomes
+            // visible as soon as the keyguard is actually reported.
             prewarmOverlay()
+            if (!keyguardLocked) scheduleKeyguardSettleCheck()
         } else {
             keepOverlayWarm = false
             hideOverlay(animate = overlayView != null)
         }
+    }
+
+    private fun scheduleKeyguardSettleCheck() {
+        if (keyguardSettleAttempts >= KEYGUARD_SETTLE_MAX_ATTEMPTS) return
+        keyguardSettleAttempts += 1
+        mainHandler.removeCallbacks(reevaluateOverlay)
+        mainHandler.postDelayed(reevaluateOverlay, KEYGUARD_SETTLE_RETRY_MS)
     }
 
     private fun prewarmOverlay() {
@@ -332,11 +372,19 @@ class ResonanceAccessibilityService : AccessibilityService() {
     private fun showOverlay() {
         mainHandler.removeCallbacks(removeOverlay)
         isExiting.value = false
+        // The incoming full-screen surface owns visibility until its first pre-draw. A state
+        // refresh during those few milliseconds must not reveal the transparent surface early.
+        if (overlayTransitioning) return
         overlayView?.let {
-            it.visibility = View.VISIBLE
-            it.isEnabled = true
             if (LockScreenPreferences.isAutomaticPlayerEnabled(this) && !customPlayerExpanded) {
                 expandCustomPlayer()
+            } else {
+                // A pre-warmed launcher may have been hidden during a prior collapse. Restore it
+                // immediately—there is no entrance animation on the small FAB.
+                it.animate().cancel()
+                it.visibility = View.VISIBLE
+                it.alpha = 1f
+                it.isEnabled = true
             }
             registerVolumeObserver()
             scheduleKeyguardGuard()
@@ -351,10 +399,12 @@ class ResonanceAccessibilityService : AccessibilityService() {
         mainHandler.removeCallbacks(removeOverlay)
         isExiting.value = false
         customPlayerExpanded = LockScreenPreferences.isAutomaticPlayerEnabled(this)
+        overlayTransitioning = false
 
         val owner = OverlayLifecycleOwner()
         val view = ComposeView(this).apply {
             visibility = if (visible) View.VISIBLE else View.INVISIBLE
+            alpha = 1f
             setBackgroundColor(Color.TRANSPARENT)
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
             setViewTreeLifecycleOwner(owner)
@@ -363,7 +413,7 @@ class ResonanceAccessibilityService : AccessibilityService() {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
             filterTouchesWhenObscured = true
             systemUiVisibility =
-                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
                     View.SYSTEM_UI_FLAG_LAYOUT_STABLE
             setOverlayContent(this, expanded = customPlayerExpanded)
         }
@@ -390,31 +440,17 @@ class ResonanceAccessibilityService : AccessibilityService() {
      * WRAP_CONTENT window, touches outside the FAB continue to reach SystemUI's native player.
      */
     private fun collapseCustomPlayer() {
-        val view = overlayView ?: run {
-            customPlayerExpanded = false
-            return
-        }
-        if (!customPlayerExpanded) return
-
-        customPlayerExpanded = false
-        isExiting.value = false
-        setOverlayContent(view, expanded = false)
-        updateOverlayLayout(expanded = false)
+        if (!customPlayerExpanded || overlayTransitioning) return
+        switchOverlay(expanded = false)
     }
 
     private fun expandCustomPlayer() {
-        val view = overlayView ?: return
-        if (customPlayerExpanded) return
-
-        customPlayerExpanded = true
-        isExiting.value = false
-        updateOverlayLayout(expanded = true)
-        setOverlayContent(view, expanded = true)
-        registerVolumeObserver()
+        if (customPlayerExpanded || overlayTransitioning) return
+        switchOverlay(expanded = true)
     }
 
     private fun moveFabBy(deltaX: Float, deltaY: Float) {
-        if (customPlayerExpanded) return
+        if (customPlayerExpanded || overlayTransitioning) return
         val view = overlayView ?: return
         val params = overlayLayoutParams ?: return
         val density = resources.displayMetrics.density
@@ -436,8 +472,8 @@ class ResonanceAccessibilityService : AccessibilityService() {
     }
 
     private fun setOverlayContent(view: ComposeView, expanded: Boolean) {
-        if (expanded) {
-            view.setContent {
+        view.setContent {
+            if (expanded) {
                 val state by MediaSessionMonitor.state.collectAsState()
                 val visualTheme = remember { LockScreenPreferences.getVisualTheme(this@ResonanceAccessibilityService) }
                 ResonanceTheme(darkTheme = true) {
@@ -458,9 +494,7 @@ class ResonanceAccessibilityService : AccessibilityService() {
                         onClose = ::collapseCustomPlayer,
                     )
                 }
-            }
-        } else {
-            view.setContent {
+            } else {
                 ResonanceTheme(darkTheme = true) {
                     MaterialPlayerLauncher(
                         onClick = ::expandCustomPlayer,
@@ -469,6 +503,81 @@ class ResonanceAccessibilityService : AccessibilityService() {
                 }
             }
         }
+    }
+
+    /**
+     * Never resize an attached FAB window into a player window. Several OEM WindowManagers place
+     * the outgoing 72dp surface at (0, 0) for a frame during that resize. Preparing a separate
+     * full/small window avoids that frame altogether and lets the old surface remain correctly
+     * positioned until the replacement has completed its first layout.
+     */
+    private fun switchOverlay(expanded: Boolean) {
+        val outgoingView = overlayView ?: run {
+            customPlayerExpanded = expanded
+            attachOverlay(visible = true)
+            return
+        }
+        val outgoingOwner = overlayOwner
+        overlayTransitioning = true
+        isExiting.value = false
+
+        val incomingOwner = OverlayLifecycleOwner()
+        val incomingView = ComposeView(this).apply {
+            // Alpha zero still receives measure/layout/pre-draw callbacks; INVISIBLE does not on
+            // all OEMs. It gives us a guaranteed fully rendered first frame without exposing it.
+            visibility = View.VISIBLE
+            alpha = 0f
+            isEnabled = false
+            setBackgroundColor(Color.TRANSPARENT)
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
+            setViewTreeLifecycleOwner(incomingOwner)
+            setViewTreeSavedStateRegistryOwner(incomingOwner)
+            setViewTreeViewModelStoreOwner(incomingOwner)
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+            filterTouchesWhenObscured = true
+            systemUiVisibility =
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            setOverlayContent(this, expanded = expanded)
+        }
+        val incomingParams = createOverlayLayoutParams(expanded)
+
+        runCatching {
+            getSystemService(WindowManager::class.java).addView(incomingView, incomingParams)
+        }.onSuccess {
+            outgoingOverlayView = outgoingView
+            outgoingOverlayOwner = outgoingOwner
+            overlayView = incomingView
+            overlayOwner = incomingOwner
+            overlayLayoutParams = incomingParams
+            customPlayerExpanded = expanded
+            incomingOwner.start()
+            if (expanded) registerVolumeObserver() else unregisterVolumeObserver()
+
+            incomingView.doOnPreDraw {
+                if (overlayView !== incomingView || customPlayerExpanded != expanded) return@doOnPreDraw
+                removeOutgoingOverlay()
+                overlayTransitioning = false
+                incomingView.isEnabled = true
+                // A short alpha-only fade is cheap to composite and lets the full UI appear as a
+                // single surface, rather than a stack of expensive entrance animations.
+                incomingView.animate()
+                    .alpha(1f)
+                    .setDuration(OVERLAY_REVEAL_MS)
+                    .start()
+            }
+        }.onFailure {
+            incomingOwner.destroy()
+            overlayTransitioning = false
+        }
+    }
+
+    private fun removeOutgoingOverlay() {
+        val outgoingView = outgoingOverlayView ?: return
+        outgoingOverlayView = null
+        runCatching { getSystemService(WindowManager::class.java).removeViewImmediate(outgoingView) }
+        outgoingOverlayOwner?.destroy()
+        outgoingOverlayOwner = null
     }
 
     @Suppress("DEPRECATION")
@@ -486,7 +595,11 @@ class ResonanceAccessibilityService : AccessibilityService() {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = if (expanded) Gravity.FILL else Gravity.TOP or Gravity.END
-            if (!expanded) {
+            if (expanded) {
+                // Do not inherit a previous launcher coordinate during a full-screen resize.
+                x = 0
+                y = 0
+            } else {
                 // Default to the open area just above the native media card. The position is
                 // saved after a drag, so users can move it anywhere on the keyguard.
                 val (savedX, savedY) = LockScreenPreferences.fabPositionDp(
@@ -528,6 +641,13 @@ class ResonanceAccessibilityService : AccessibilityService() {
 
     private fun guardLockScreenVisibility() {
         if (overlayView == null || !screenInteractive) return
+        if (customPlayerExpanded) {
+            // Do not collapse an actively opened player because KeyguardManager briefly reports
+            // false during the screen-on hand-off. ACTION_USER_PRESENT and SCREEN_OFF still
+            // remove it immediately; otherwise the user's swipe owns dismissal.
+            scheduleKeyguardGuard()
+            return
+        }
         if (!isKeyguardLocked()) {
             dismissedForCurrentLock = true
             removeOverlayNow()
@@ -540,7 +660,13 @@ class ResonanceAccessibilityService : AccessibilityService() {
         mainHandler.removeCallbacks(removeOverlay)
         mainHandler.removeCallbacks(keyguardGuard)
         unregisterVolumeObserver()
+        // A transition cannot finish while the display is off because an invisible root may not
+        // receive pre-draw. Dispose the outgoing window now instead of retaining it until wake.
+        removeOutgoingOverlay()
+        overlayTransitioning = false
         overlayView?.apply {
+            animate().cancel()
+            alpha = 1f
             isEnabled = false
             visibility = View.INVISIBLE
         }
@@ -565,15 +691,19 @@ class ResonanceAccessibilityService : AccessibilityService() {
     }
 
     private fun removeOverlayNow() {
-        val view = overlayView ?: return
+        val view = overlayView
+        val owner = overlayOwner
         mainHandler.removeCallbacks(keyguardGuard)
         overlayView = null
         overlayLayoutParams = null
         customPlayerExpanded = false
+        overlayTransitioning = false
+        keyguardSettleAttempts = 0
         keepOverlayWarm = false
         unregisterVolumeObserver()
-        runCatching { getSystemService(WindowManager::class.java).removeViewImmediate(view) }
-        overlayOwner?.destroy()
+        removeOutgoingOverlay()
+        view?.let { runCatching { getSystemService(WindowManager::class.java).removeViewImmediate(it) } }
+        owner?.destroy()
         overlayOwner = null
         isExiting.value = false
     }
@@ -620,10 +750,13 @@ class ResonanceAccessibilityService : AccessibilityService() {
     private companion object {
         const val EXIT_ANIMATION_MS = 280L
         const val KEYGUARD_SETTLE_MS = 20L
+        const val KEYGUARD_SETTLE_RETRY_MS = 40L
+        const val KEYGUARD_SETTLE_MAX_ATTEMPTS = 30
         const val CALL_RESUME_INITIAL_DELAY_MS = 80L
         const val CALL_RESUME_RETRY_MS = 200L
         const val CALL_RESUME_MAX_ATTEMPTS = 20
         const val VOLUME_OBSERVER_SETTLE_MS = 24L
+        const val OVERLAY_REVEAL_MS = 90L
         const val FAB_WINDOW_SIZE_DP = 72
         const val KEYGUARD_GUARD_INTERVAL_MS = 420L
     }

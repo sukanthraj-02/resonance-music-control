@@ -163,8 +163,6 @@ fun LockScreenPlayerScreen(
 ) {
     var verticalDrag by remember { mutableFloatStateOf(0f) }
     var playlistVisible by remember { mutableStateOf(false) }
-    var hasEntered by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { hasEntered = true }
 
     val coverPrimary by animateColorAsState(
         targetValue = Color(state.artworkPrimaryArgb),
@@ -183,62 +181,24 @@ fun LockScreenPlayerScreen(
         coverSecondary = coverSecondary,
     )
     val contentAlpha by animateFloatAsState(
-        targetValue = when {
-            isExiting -> 0f
-            hasEntered -> 1f
-            else -> 0f
-        },
+        targetValue = if (isExiting) 0f else 1f,
         animationSpec = tween(
-            durationMillis = if (isExiting) 250 else 180,
+            durationMillis = if (isExiting) 180 else 90,
             easing = FastOutSlowInEasing,
         ),
         label = "player alpha",
     )
     val contentScale by animateFloatAsState(
-        targetValue = when {
-            isExiting -> 0.90f
-            hasEntered -> 1f
-            else -> 0.97f
-        },
-        animationSpec = tween(durationMillis = ResonanceTokens.Motion.contentEnterMs, easing = FastOutSlowInEasing),
+        targetValue = if (isExiting) 0.97f else 1f,
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
         label = "player scale",
     )
     val contentOffsetDp by animateFloatAsState(
-        targetValue = when {
-            isExiting -> 76f
-            hasEntered -> 0f
-            else -> 24f
-        },
-        animationSpec = tween(durationMillis = 285, easing = FastOutSlowInEasing),
+        targetValue = if (isExiting) 28f else 0f,
+        animationSpec = tween(durationMillis = 180, easing = FastOutSlowInEasing),
         label = "player offset",
     )
     val density = LocalDensity.current
-    // Track changes settle once without overshoot.
-    val trackMotionKey = remember(state.title, state.artist, state.artworkSignature) {
-        "${state.title}|${state.artist}|${state.artworkSignature}"
-    }
-    var trackMotionSettled by remember(trackMotionKey) { mutableStateOf(false) }
-    LaunchedEffect(trackMotionKey) {
-        trackMotionSettled = false
-        delay(20L)
-        trackMotionSettled = true
-    }
-    val physicsScale by animateFloatAsState(
-        targetValue = if (trackMotionSettled) 1f else 0.985f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = 520f,
-        ),
-        label = "track physics scale",
-    )
-    val physicsOffsetDp by animateFloatAsState(
-        targetValue = if (trackMotionSettled) 0f else 8f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = 520f,
-        ),
-        label = "track physics offset",
-    )
     val opaqueBackground = remember(coverPrimary, coverSecondary) {
         SolidColor(coverPrimary.scaledForBackground(0.26f))
     }
@@ -285,10 +245,10 @@ fun LockScreenPlayerScreen(
                 .padding(bottom = 76.dp)
                 .graphicsLayer {
                     alpha = contentAlpha
-                    scaleX = contentScale * physicsScale
-                    scaleY = contentScale * physicsScale
+                    scaleX = contentScale
+                    scaleY = contentScale
                     translationY = with(density) {
-                        (contentOffsetDp.dp + physicsOffsetDp.dp).toPx()
+                        contentOffsetDp.dp.toPx()
                     }
                 },
             onPlayPause = onPlayPause,
@@ -428,12 +388,25 @@ private fun ThemeBackdrop(
             )
         }
         PlayerVisualTheme.HI_FI_STUDIO -> {
+            // Keep the studio's dark chassis, but let the sleeve supply a quiet
+            // ambient colour cast. This is deliberately a plain, cached gradient:
+            // it follows the artwork without adding another expensive animated layer.
             val hifiBg = remember(coverPrimary, coverSecondary) {
+                val topTint = coverPrimary
+                    .scaledForBackground(0.34f)
+                    .blendedForBackground(Color(0xFF171310), 0.46f)
+                val middleTint = coverPrimary
+                    .blendedForBackground(coverSecondary, 0.48f)
+                    .scaledForBackground(0.28f)
+                    .blendedForBackground(Color(0xFF110E0C), 0.54f)
+                val bottomTint = coverSecondary
+                    .scaledForBackground(0.22f)
+                    .blendedForBackground(Color(0xFF080706), 0.70f)
                 Brush.verticalGradient(
                     listOf(
-                        coverPrimary.scaledForBackground(0.30f),
-                        coverSecondary.scaledForBackground(0.18f),
-                        Color(0xFF0B0908),
+                        topTint,
+                        middleTint,
+                        bottomTint,
                     ),
                 )
             }
@@ -869,6 +842,16 @@ private fun Color.scaledForBackground(factor: Float): Color = Color(
     blue = blue * factor,
     alpha = 1f,
 )
+
+private fun Color.blendedForBackground(other: Color, otherFraction: Float): Color {
+    val fraction = otherFraction.coerceIn(0f, 1f)
+    return Color(
+        red = red + (other.red - red) * fraction,
+        green = green + (other.green - green) * fraction,
+        blue = blue + (other.blue - blue) * fraction,
+        alpha = 1f,
+    )
+}
 
 @Composable
 private fun ArtworkPanel(
