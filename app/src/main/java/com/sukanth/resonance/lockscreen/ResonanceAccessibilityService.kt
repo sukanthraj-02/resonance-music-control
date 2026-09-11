@@ -21,6 +21,7 @@ import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
@@ -589,12 +590,12 @@ class ResonanceAccessibilityService : AccessibilityService() {
             addAction(LockScreenPreferences.ACTION_AUTOMATIC_PLAYER_CHANGED)
             addAction(android.telephony.TelephonyManager.ACTION_PHONE_STATE_CHANGED)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(screenReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            registerReceiver(screenReceiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            this,
+            screenReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         receiverRegistered = true
     }
 
