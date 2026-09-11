@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#090b12"/>
+      <stop offset="55%" stop-color="#303b61"/>
+      <stop offset="100%" stop-color="#9aa9d3"/>
+    </linearGradient>
+    <linearGradient id="disc" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#252c42"/>
+      <stop offset="100%" stop-color="#0e111b"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <circle cx="820" cy="170" r="330" fill="#e5eaff" opacity=".12"/>
+  <circle cx="160" cy="880" r="300" fill="#111522" opacity=".30"/>
+  <circle cx="512" cy="520" r="292" fill="none" stroke="#e3e8ff" stroke-opacity=".20" stroke-width="4"/>
+  <circle cx="512" cy="520" r="232" fill="url(#disc)" stroke="#f3f5ff" stroke-opacity=".38" stroke-width="12"/>
+  <circle cx="512" cy="520" r="72" fill="#e2e7fb"/>
+  <circle cx="512" cy="520" r="20" fill="#394360"/>
+  <polyline points="112,596 176,596 224,430 288,714 352,470 416,668 480,494 544,648 608,452 672,646 736,486 800,596 912,596"
+        fill="none" stroke="#f3f5ff" stroke-linecap="round" stroke-linejoin="round" stroke-width="28"/>
+  <rect x="72" y="76" width="286" height="82" rx="41" fill="#ffffff" opacity=".16"/>
+  <circle cx="120" cy="117" r="11" fill="#dce3ff"/>
+  <rect x="150" y="106" width="150" height="22" rx="11" fill="#dce3ff" opacity=".84"/>
+</svg>
