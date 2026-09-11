@@ -9,12 +9,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.core.net.toUri
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.core.net.toUri
 import com.sukanth.resonance.lockscreen.ExternalPlayerViewModel
 import com.sukanth.resonance.lockscreen.LockScreenPreferences
 import com.sukanth.resonance.lockscreen.MediaAccessService
@@ -30,7 +30,6 @@ class MainActivity : ComponentActivity() {
     private var visualTheme by mutableStateOf(PlayerVisualTheme.MATERIAL_3_EXPRESSIVE)
     private var showAccessibilityDisclosure by mutableStateOf(false)
     private var enableAfterPermissions = false
-    private var returningFromRestrictedSettings = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -63,11 +62,7 @@ class MainActivity : ComponentActivity() {
                     onRequestNotificationAccess = ::openNotificationAccess,
                     onRequestUnrestrictedBatteryAccess = ::openUnrestrictedBatteryAccess,
                     onRequestAccessibilityAccess = {
-                        if (accessibilityAccess) {
-                            openAccessibilityAccess()
-                        } else {
-                            showAccessibilityDisclosure = true
-                        }
+                        requestAccessibilityAccess(accessibilityAccess)
                     },
                     onDismissAccessibilityDisclosure = {
                         showAccessibilityDisclosure = false
@@ -85,7 +80,7 @@ class MainActivity : ComponentActivity() {
                                 persistLockScreenEnabled(false)
                             }
                             !notificationAccess -> openNotificationAccess()
-                            !accessibilityAccess -> showAccessibilityDisclosure = true
+                            !accessibilityAccess -> requestAccessibilityAccess(accessibilityAccess)
                             else -> {
                                 enableAfterPermissions = false
                                 persistLockScreenEnabled(true)
@@ -115,10 +110,6 @@ class MainActivity : ComponentActivity() {
         visualTheme = LockScreenPreferences.getVisualTheme(this)
         permissionRefresh++
         playerViewModel.refresh()
-        if (returningFromRestrictedSettings) {
-            returningFromRestrictedSettings = false
-            if (!playerViewModel.hasAccessibilityAccess()) openAccessibilitySettings()
-        }
         if (
             enableAfterPermissions &&
             playerViewModel.hasNotificationAccess() &&
@@ -131,7 +122,12 @@ class MainActivity : ComponentActivity() {
             playerViewModel.hasNotificationAccess() &&
             !playerViewModel.hasAccessibilityAccess()
         ) {
-            showAccessibilityDisclosure = true
+            // Returning from Accessibility without enabling the service should not immediately
+            // reopen the same explanation. The user can tap the access card again when ready.
+            enableAfterPermissions = false
+            if (!LockScreenPreferences.isAccessibilityDisclosureAccepted(this)) {
+                showAccessibilityDisclosure = true
+            }
         }
     }
 
@@ -156,17 +152,13 @@ class MainActivity : ComponentActivity() {
             .onFailure { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
     }
 
-    private fun openAccessibilityAccess() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            returningFromRestrictedSettings = true
-            startActivity(
-                Intent(
-                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                    "package:$packageName".toUri(),
-                ),
-            )
+    private fun openAccessibilityAccess() = openAccessibilitySettings()
+
+    private fun requestAccessibilityAccess(accessGranted: Boolean) {
+        if (accessGranted || LockScreenPreferences.isAccessibilityDisclosureAccepted(this)) {
+            openAccessibilityAccess()
         } else {
-            openAccessibilitySettings()
+            showAccessibilityDisclosure = true
         }
     }
 

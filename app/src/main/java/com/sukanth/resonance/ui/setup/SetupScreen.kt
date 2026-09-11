@@ -246,8 +246,7 @@ fun SetupScreen(
                         "volume while that controller is visible.\n\nIt does not read screen " +
                         "content, passwords, typed text, or other apps, and it cannot perform " +
                         "gestures. Song information comes separately from media notification access. " +
-                        "On Android 13 and newer, Android may first show App Info: tap ⋮, choose " +
-                        "Allow restricted settings, then enable Resonance in Accessibility.",
+                        "Enable Resonance Music Control in Accessibility to continue.",
                 )
             },
             confirmButton = {
@@ -1290,4 +1289,3 @@ private fun ThemePreviewThumbnail(
         }
     }
 }
-

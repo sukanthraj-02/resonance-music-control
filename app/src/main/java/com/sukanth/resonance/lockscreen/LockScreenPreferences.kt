@@ -58,6 +58,10 @@ object LockScreenPreferences {
         }
     }
 
+    fun isAccessibilityDisclosureAccepted(context: Context): Boolean = context
+        .getSharedPreferences(FILE_NAME, Context.MODE_PRIVATE)
+        .getBoolean(KEY_ACCESSIBILITY_DISCLOSURE_ACCEPTED, false)
+
     fun getVisualTheme(context: Context): PlayerVisualTheme {
         val stored = context.getSharedPreferences(FILE_NAME, Context.MODE_PRIVATE)
             .getString(KEY_VISUAL_THEME, null)
