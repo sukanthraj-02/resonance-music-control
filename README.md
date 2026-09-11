@@ -68,7 +68,7 @@ behavior. No battery-optimization exemption is required or requested.
 
 ## Build
 
-This project targets Android 17 / API 37 and supports Android 6.0 / API 23 and newer.
+This project targets Android 15 / API 35 and supports Android 6.0 / API 23 and newer.
 
 ```bash
 ./gradlew testDebugUnitTest assembleDebug lintDebug
