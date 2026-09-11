@@ -1,6 +1,6 @@
-# Resonance Lock
+# Resonance Music Control
 
-Resonance Lock is a Material 3 Expressive lock-screen controller for media already playing in
+Resonance Music Control is a Material 3 Expressive lock-screen controller for media already playing in
 Spotify, YouTube Music, Apple Music, podcast apps, and other Android players. It is intentionally
 not an audio player.
 
@@ -21,13 +21,11 @@ not an audio player.
   The phone wallpaper cannot bleed into or tint the cover-derived composition. Tracks without
   artwork immediately use the neutral placeholder and default palette instead of retaining the
   previous song's cover.
-- Includes five selectable visual themes with independent layouts—not color-only presets:
-  Liquid Glass, Material 3 Expressive, Studio Neon, Scenic Ambient, and Album
-  Spotlight. They vary background composition, clock typography, source capsule, metadata
-  alignment, progress density, control grouping, button geometry, and volume placement. Every
-  theme remains fully opaque against the phone wallpaper while its buttons and controls respond
-  to a restrained blend of the current cover colors. Material 3 Expressive uses the current Material 3 Expressive color, type, shape,
-  containment, and motion system.
+- Includes four selectable visual themes with independent layouts—not color-only presets:
+  Material 3 Expressive, Frosted Glass, Hi-Fi Studio, and Duotone Canvas. They vary background
+  composition, clock typography, metadata alignment, progress density, control grouping, button
+  geometry, and volume placement. Material 3 Expressive uses the current Material 3 Expressive
+  color, type, shape, containment, and motion system.
 - Uses an expanded rounded Material 3 Expressive shape scale across setup cards, dialogs, artwork,
   player surfaces, transport buttons, queue controls, and volume containers.
 - Uses short, coordinated artwork scale and metadata slide transitions so a track change reads as
@@ -52,10 +50,10 @@ may require allowing installation from the browser or file manager used to open
 the APK. GitHub Actions also publishes a debug APK artifact for contributors
 and testing; it is not the primary end-user download.
 
-1. Install the APK and open **Resonance Lock**.
-2. Tap **Grant access** under **Media notification access**, then enable **Resonance media access**.
+1. Install the APK and open **Resonance Music Control**.
+2. Tap **Grant access** under **Media notification access**, then enable **Resonance Music Control media access**.
 3. Read the in-app disclosure under **Lock-screen display access**, continue to Android's
-   Accessibility settings, and enable **Resonance lock-screen player**.
+   Accessibility settings, and enable **Resonance Music Control lock-screen controller**.
 4. Turn on **Enable lock-screen player**.
 5. Start a song in Spotify, YouTube Music, Apple Music, or another media app.
 6. Tap **Preview lock-screen player** once to verify the selected app and controls.
@@ -80,12 +78,13 @@ The Gradle debug APK is generated at:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The included GitHub Actions workflow runs the unit tests, lint, and debug APK
-build on every pull request and push to `main`. The checked-in
-`resonance-lock.apk` is the original installable APK supplied with this
-project. Its SHA-256 is published with the GitHub release. The project
-intentionally does not include a signing key; future release signing should be
-configured privately using GitHub Actions secrets or Android Play App Signing.
+The included GitHub Actions workflow runs unit tests, lint, and a debug APK
+build on every pull request and push to `main`. The current GitHub Release APK
+is debug-signed for testing; it is not a production-signed public release. The
+project intentionally does not include a signing key. Before broad
+distribution, configure a private release keystore through GitHub Actions
+secrets (or use Android Play App Signing), then publish a signed release APK
+with its SHA-256 checksum.
 
 ## Privacy and permissions
 
