@@ -4,6 +4,10 @@ Resonance Music Control is a Material 3 Expressive lock-screen controller for me
 Spotify, YouTube Music, Apple Music, podcast apps, and other Android players. It is intentionally
 not an audio player.
 
+## Contributors
+
+See [CONTRIBUTORS.md](CONTRIBUTORS.md) for project credits.
+
 ## Features
 
 - Discovers active media sessions after the user grants Android notification access.
