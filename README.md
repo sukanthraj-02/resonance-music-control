@@ -47,11 +47,10 @@ not an audio player.
 
 ## Install and set up on a phone
 
-Download the APK from the repository's **Releases** page or from a GitHub
-Actions artifact. Android may require allowing installation from the browser or
-file manager used to open the APK. APKs built by GitHub Actions are debug
-artifacts for testing; a production release should be signed by the
-maintainer's protected release key.
+Download `resonance-lock.apk` from the repository's **Releases** page. Android
+may require allowing installation from the browser or file manager used to open
+the APK. GitHub Actions also publishes a debug APK artifact for contributors
+and testing; it is not the primary end-user download.
 
 1. Install the APK and open **Resonance Lock**.
 2. Tap **Grant access** under **Media notification access**, then enable **Resonance media access**.
@@ -68,22 +67,25 @@ behavior. No battery-optimization exemption is required or requested.
 
 ## Build
 
-This project targets Android 15 / API 35 and supports Android 6.0 / API 23 and newer.
+This project targets Android 15 / API 35, compiles against API 36, and supports
+Android 6.0 / API 23 and newer.
 
 ```bash
 ./gradlew testDebugUnitTest assembleDebug lintDebug
 ```
 
-The debug APK is generated at:
+The Gradle debug APK is generated at:
 
 ```text
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
 The included GitHub Actions workflow runs the unit tests, lint, and debug APK
-build on every pull request and push to `main`. The project intentionally does
-not include a signing key. Release signing must be configured privately using
-GitHub Actions secrets or Android Play App Signing.
+build on every pull request and push to `main`. The checked-in
+`resonance-lock.apk` is the original installable APK supplied with this
+project. Its SHA-256 is published with the GitHub release. The project
+intentionally does not include a signing key; future release signing should be
+configured privately using GitHub Actions secrets or Android Play App Signing.
 
 ## Privacy and permissions
 

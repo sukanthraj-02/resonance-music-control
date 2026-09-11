@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.sukanth.resonance"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.sukanth.resonance"
