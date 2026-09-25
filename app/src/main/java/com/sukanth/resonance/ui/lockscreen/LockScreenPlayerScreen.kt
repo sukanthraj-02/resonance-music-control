@@ -1,6 +1,11 @@
 package com.sukanth.resonance.ui.lockscreen
 
+import android.animation.ValueAnimator
+import android.app.ActivityManager
+import android.content.Context
 import android.graphics.Bitmap
+import android.os.Build
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
@@ -49,6 +54,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.displayCutoutPadding
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -56,6 +62,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -140,6 +147,44 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
+private enum class PlaylistPresentation {
+    BOTTOM_SHEET,
+    SIDE_PANEL,
+}
+
+/**
+ * Width and height are both important on a lock screen: a landscape phone has a wide
+ * canvas but very little vertical room, while a tablet needs a denser, more deliberate
+ * composition than a stretched phone column.
+ */
+private data class ResponsivePlayerLayout(
+    val wide: Boolean,
+    val compact: Boolean,
+    val contentMaxWidth: Dp,
+    val contentSideInset: Dp,
+    val showClock: Boolean,
+    val playlistPresentation: PlaylistPresentation,
+)
+
+/** Avoid continuously redrawing decorative motion on devices that ask for less work. */
+@Composable
+private fun rememberAmbientMotionEnabled(isPlaying: Boolean): Boolean {
+    val context = LocalContext.current
+    return remember(context, isPlaying) {
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val systemAnimationsEnabled = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ValueAnimator.areAnimatorsEnabled()
+        } else {
+            true
+        }
+        isPlaying &&
+            systemAnimationsEnabled &&
+            activityManager?.isLowRamDevice != true &&
+            powerManager?.isPowerSaveMode != true
+    }
+}
+
 /**
  * A translucent lock-screen surface. Android's real keyguard remains visible behind this content;
  * only the artwork and media controls are drawn by the app.
@@ -223,6 +268,30 @@ fun LockScreenPlayerScreen(
                 )
             },
     ) {
+        // The background may use the whole display, but player controls must react to both axes.
+        // Tablets/foldables and landscape phones use a two-column player; portrait phones retain
+        // the compact vertical composition. This avoids both stretched tabs and dead space.
+        val isLandscape = maxWidth > maxHeight
+        val wideLayout = maxWidth >= 600.dp || (isLandscape && maxWidth >= 480.dp)
+        val compact =
+            maxHeight < (if (visualTheme == PlayerVisualTheme.FROSTED_GLASS) 840.dp else 760.dp) ||
+                isLandscape
+        val contentMaxWidth = minOf(maxWidth, if (wideLayout) 960.dp else 560.dp)
+        val contentSideInset = ((maxWidth - contentMaxWidth) / 2).coerceAtLeast(0.dp)
+        val responsiveLayout = ResponsivePlayerLayout(
+            wide = wideLayout,
+            compact = compact,
+            contentMaxWidth = contentMaxWidth,
+            contentSideInset = contentSideInset,
+            // A clock is useful on a tablet and phone portrait. On short landscape displays it
+            // competes with music controls, so the artwork/control split gets that room instead.
+            showClock = !isLandscape || maxHeight >= 600.dp,
+            playlistPresentation = if (wideLayout) {
+                PlaylistPresentation.SIDE_PANEL
+            } else {
+                PlaylistPresentation.BOTTOM_SHEET
+            },
+        )
         ThemeBackdrop(
             state = state,
             visualTheme = visualTheme,
@@ -235,14 +304,17 @@ fun LockScreenPlayerScreen(
             state = state,
             visualTheme = visualTheme,
             style = visualStyle,
-            compact = maxHeight < if (visualTheme == PlayerVisualTheme.FROSTED_GLASS) 840.dp else 760.dp,
+            responsiveLayout = responsiveLayout,
             modifier = Modifier
                 .fillMaxSize()
+                // Status/navigation padding covers ordinary phones; cutout padding also protects
+                // landscape camera islands and asymmetric foldable displays.
+                .displayCutoutPadding()
                 .statusBarsPadding()
                 .navigationBarsPadding()
                 // Reserve a clean bottom rail for the playlist split button so it never
                 // overlaps the volume surface or the system gesture area.
-                .padding(bottom = 76.dp)
+                .padding(bottom = if (wideLayout) 64.dp else 76.dp)
                 .graphicsLayer {
                     alpha = contentAlpha
                     scaleX = contentScale
@@ -265,6 +337,7 @@ fun LockScreenPlayerScreen(
                 state = state,
                 style = visualStyle,
                 frostedGlass = visualTheme == PlayerVisualTheme.FROSTED_GLASS,
+                presentation = responsiveLayout.playlistPresentation,
                 onDismiss = { playlistVisible = false },
                 onSelect = { entry ->
                     onPlaylistItemSelected(entry)
@@ -282,7 +355,7 @@ fun LockScreenPlayerScreen(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .navigationBarsPadding()
-                .padding(end = 16.dp, bottom = playlistBottomPadding)
+                .padding(end = responsiveLayout.contentSideInset + 16.dp, bottom = playlistBottomPadding)
                 .zIndex(9f),
         )
 
@@ -314,7 +387,7 @@ fun LockScreenPlayerScreen(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .navigationBarsPadding()
-                .padding(start = 16.dp, bottom = playlistBottomPadding)
+                .padding(start = responsiveLayout.contentSideInset + 16.dp, bottom = playlistBottomPadding)
                 .zIndex(10f),
         ) {
             Surface(
@@ -435,6 +508,9 @@ private fun FrostedGlassBackdrop(
     coverSecondary: Color,
     alpha: Float,
 ) {
+    // Convert the Bitmap once per artwork revision. Backdrop recompositions (clock, progress,
+    // button press) should not repeatedly allocate a compose ImageBitmap.
+    val artworkImage = remember(state.artwork, state.artworkSignature) { state.artwork?.asImageBitmap() }
     val fallback = remember(coverPrimary, coverSecondary) {
         Brush.verticalGradient(
             colors = listOf(
@@ -450,9 +526,9 @@ private fun FrostedGlassBackdrop(
             .graphicsLayer { this.alpha = alpha }
             .background(fallback),
     ) {
-        if (state.artwork != null) {
+        if (artworkImage != null) {
             Image(
-                bitmap = state.artwork.asImageBitmap(),
+                bitmap = artworkImage,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
@@ -524,10 +600,12 @@ private fun DuotoneBackdrop(
 ) {
     // Spotify-style duotone canvas: full-bleed artwork crushed toward two hues
     // under a soft gradient wash, with a gentle drift so the backdrop feels alive.
+    val ambientMotion = rememberAmbientMotionEnabled(state.isPlaying && !state.isBuffering)
+    val artworkImage = remember(state.artwork, state.artworkSignature) { state.artwork?.asImageBitmap() }
     val infiniteTransition = rememberInfiniteTransition(label = "duotone drift")
     val rawPhase by infiniteTransition.animateFloat(
         initialValue = 0f,
-        targetValue = (2f * Math.PI).toFloat(),
+        targetValue = if (ambientMotion) (2f * Math.PI).toFloat() else 0f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 18000, easing = LinearEasing),
             repeatMode = RepeatMode.Restart,
@@ -562,9 +640,9 @@ private fun DuotoneBackdrop(
             .graphicsLayer { this.alpha = alpha }
             .background(Color.Black),
     ) {
-        if (state.artwork != null) {
+        if (artworkImage != null) {
             Image(
-                bitmap = state.artwork.asImageBitmap(),
+                bitmap = artworkImage,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
@@ -620,7 +698,7 @@ private fun ThemePlayerLayout(
     state: ExternalMediaState,
     visualTheme: PlayerVisualTheme,
     style: PlayerVisualStyle,
-    compact: Boolean,
+    responsiveLayout: ResponsivePlayerLayout,
     modifier: Modifier,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -634,8 +712,26 @@ private fun ThemePlayerLayout(
         AndroidExpressiveEmptyLayout(
             state = state,
             style = style,
-            compact = compact,
+            compact = responsiveLayout.compact,
+            contentMaxWidth = responsiveLayout.contentMaxWidth,
             modifier = modifier,
+        )
+        return
+    }
+    if (responsiveLayout.wide) {
+        ResponsiveWidePlayerLayout(
+            state = state,
+            visualTheme = visualTheme,
+            style = style,
+            responsiveLayout = responsiveLayout,
+            modifier = modifier,
+            onPlayPause = onPlayPause,
+            onPrevious = onPrevious,
+            onNext = onNext,
+            onSeek = onSeek,
+            onVolumeChange = onVolumeChange,
+            onLike = onLike,
+            onShuffle = onShuffle,
         )
         return
     }
@@ -644,7 +740,8 @@ private fun ThemePlayerLayout(
             iOSGlassLayout(
                 state = state,
                 style = style,
-                compact = compact,
+                compact = responsiveLayout.compact,
+                contentMaxWidth = responsiveLayout.contentMaxWidth,
                 modifier = modifier,
                 onPlayPause = onPlayPause,
                 onPrevious = onPrevious,
@@ -659,7 +756,8 @@ private fun ThemePlayerLayout(
             HiFiLayout(
                 state = state,
                 style = style,
-                compact = compact,
+                compact = responsiveLayout.compact,
+                contentMaxWidth = responsiveLayout.contentMaxWidth,
                 modifier = modifier,
                 onPlayPause = onPlayPause,
                 onPrevious = onPrevious,
@@ -674,7 +772,8 @@ private fun ThemePlayerLayout(
             DuotoneLayout(
                 state = state,
                 style = style,
-                compact = compact,
+                compact = responsiveLayout.compact,
+                contentMaxWidth = responsiveLayout.contentMaxWidth,
                 modifier = modifier,
                 onPlayPause = onPlayPause,
                 onPrevious = onPrevious,
@@ -689,7 +788,8 @@ private fun ThemePlayerLayout(
             AndroidExpressiveLayout(
                 state = state,
                 style = style,
-                compact = compact,
+                compact = responsiveLayout.compact,
+                contentMaxWidth = responsiveLayout.contentMaxWidth,
                 modifier = modifier,
                 onPlayPause = onPlayPause,
                 onPrevious = onPrevious,
@@ -698,6 +798,333 @@ private fun ThemePlayerLayout(
                 onVolumeChange = onVolumeChange,
                 onLike = onLike,
                 onShuffle = onShuffle,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ResponsiveWidePlayerLayout(
+    state: ExternalMediaState,
+    visualTheme: PlayerVisualTheme,
+    style: PlayerVisualStyle,
+    responsiveLayout: ResponsivePlayerLayout,
+    modifier: Modifier,
+    onPlayPause: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onVolumeChange: (Int) -> Unit,
+    onLike: () -> Unit,
+    onShuffle: () -> Unit,
+) {
+    val isFrosted = visualTheme == PlayerVisualTheme.FROSTED_GLASS
+    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = responsiveLayout.contentMaxWidth)
+                .fillMaxWidth()
+                .fillMaxHeight()
+                .padding(horizontal = if (responsiveLayout.compact) 16.dp else 24.dp),
+        ) {
+            if (responsiveLayout.showClock) {
+                if (visualTheme == PlayerVisualTheme.MATERIAL_3_EXPRESSIVE) {
+                    AndroidExpressiveClock(style = style, compact = true)
+                } else {
+                    CoverLockClock(
+                        centered = false,
+                        compact = true,
+                        datePill = visualTheme == PlayerVisualTheme.FROSTED_GLASS,
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+            }
+
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center,
+            ) {
+                // The art is governed by both available axes. This protects short landscape
+                // phones from vertical clipping, while a tablet gets a satisfyingly large sleeve.
+                val artworkSize = minOf(
+                    maxWidth * 0.42f,
+                    maxHeight * if (responsiveLayout.compact) 0.70f else 0.82f,
+                    440.dp,
+                ).coerceAtLeast(140.dp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(artworkSize),
+                    horizontalArrangement = Arrangement.spacedBy(
+                        if (responsiveLayout.compact) 16.dp else 28.dp,
+                    ),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ArtworkPanel(
+                        artwork = state.artwork,
+                        artworkSignature = state.artworkSignature,
+                        style = style,
+                        modifier = Modifier
+                            .size(artworkSize)
+                            .then(
+                                if (isFrosted) {
+                                    Modifier.border(1.dp, Color.White.copy(alpha = 0.42f), style.artworkShape)
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                        elevation = if (responsiveLayout.compact) 10.dp else 18.dp,
+                    )
+                    ResponsiveWideControlPanel(
+                        state = state,
+                        visualTheme = visualTheme,
+                        style = style,
+                        compact = responsiveLayout.compact,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight(),
+                        onPlayPause = onPlayPause,
+                        onPrevious = onPrevious,
+                        onNext = onNext,
+                        onSeek = onSeek,
+                        onVolumeChange = onVolumeChange,
+                        onLike = onLike,
+                        onShuffle = onShuffle,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ResponsiveWideControlPanel(
+    state: ExternalMediaState,
+    visualTheme: PlayerVisualTheme,
+    style: PlayerVisualStyle,
+    compact: Boolean,
+    modifier: Modifier,
+    onPlayPause: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onSeek: (Long) -> Unit,
+    onVolumeChange: (Int) -> Unit,
+    onLike: () -> Unit,
+    onShuffle: () -> Unit,
+) {
+    val isFrosted = visualTheme == PlayerVisualTheme.FROSTED_GLASS
+    val liquidControls = visualTheme != PlayerVisualTheme.MATERIAL_3_EXPRESSIVE
+    val panelShape = when (visualTheme) {
+        PlayerVisualTheme.FROSTED_GLASS -> RoundedCornerShape(32.dp)
+        PlayerVisualTheme.DUOTONE -> RoundedCornerShape(28.dp)
+        else -> style.cardShape
+    }
+    val progressTreatment = when (visualTheme) {
+        PlayerVisualTheme.FROSTED_GLASS -> ProgressTreatment.GLASS
+        PlayerVisualTheme.DUOTONE, PlayerVisualTheme.HI_FI_STUDIO -> ProgressTreatment.EDITORIAL
+        else -> ProgressTreatment.EXPRESSIVE
+    }
+    val panelContent: @Composable () -> Unit = {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(if (compact) 12.dp else 18.dp),
+        ) {
+            if (!compact && state.sourceApp.isNotBlank()) {
+                SourceCapsule(
+                    state = state,
+                    style = style,
+                    minimal = true,
+                    uppercase = true,
+                    showSignal = false,
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            Text(
+                text = state.title.ifBlank { "Nothing Playing" },
+                color = style.foreground,
+                fontSize = if (compact) 19.sp else 27.sp,
+                lineHeight = if (compact) 23.sp else 31.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = state.artist.ifBlank { state.sourceApp.ifBlank { "Media" } },
+                color = style.secondaryForeground,
+                fontSize = if (compact) 13.sp else 16.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(if (compact) 4.dp else 12.dp))
+            ThemedPositionSection(
+                state = state,
+                style = style,
+                onSeek = onSeek,
+                treatment = progressTreatment,
+            )
+            Spacer(Modifier.height(if (compact) 4.dp else 12.dp))
+            if (compact) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ResponsiveWideTransportControls(
+                        state = state,
+                        visualTheme = visualTheme,
+                        style = style,
+                        compact = true,
+                        modifier = Modifier.weight(1f),
+                        onPlayPause = onPlayPause,
+                        onPrevious = onPrevious,
+                        onNext = onNext,
+                        onLike = onLike,
+                        onShuffle = onShuffle,
+                    )
+                    VolumeControlRow(
+                        state = state,
+                        style = style,
+                        onVolumeChange = onVolumeChange,
+                        modifier = Modifier.weight(1f),
+                        frostedGlass = isFrosted,
+                    )
+                }
+            } else {
+                ResponsiveWideTransportControls(
+                    state = state,
+                    visualTheme = visualTheme,
+                    style = style,
+                    compact = false,
+                    modifier = Modifier.fillMaxWidth(),
+                    onPlayPause = onPlayPause,
+                    onPrevious = onPrevious,
+                    onNext = onNext,
+                    onLike = onLike,
+                    onShuffle = onShuffle,
+                )
+                Spacer(Modifier.height(12.dp))
+                VolumeControlRow(
+                    state = state,
+                    style = style,
+                    onVolumeChange = onVolumeChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    frostedGlass = isFrosted,
+                )
+            }
+        }
+    }
+    if (isFrosted) {
+        FrostedGlassPanel(
+            style = style,
+            shape = panelShape,
+            modifier = modifier,
+            compactHeight = compact,
+            content = panelContent,
+        )
+    } else {
+        Surface(
+            modifier = modifier,
+            shape = panelShape,
+            color = style.controlContainer.copy(alpha = if (visualTheme == PlayerVisualTheme.DUOTONE) 0.90f else 0.96f),
+            contentColor = style.foreground,
+            border = androidx.compose.foundation.BorderStroke(style.borderWidth, style.cardBorder),
+            shadowElevation = if (compact) 6.dp else 12.dp,
+            content = panelContent,
+        )
+    }
+}
+
+@Composable
+private fun ResponsiveWideTransportControls(
+    state: ExternalMediaState,
+    visualTheme: PlayerVisualTheme,
+    style: PlayerVisualStyle,
+    compact: Boolean,
+    modifier: Modifier,
+    onPlayPause: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onLike: () -> Unit,
+    onShuffle: () -> Unit,
+) {
+    val liquidMotion = visualTheme != PlayerVisualTheme.MATERIAL_3_EXPRESSIVE
+    val buttonSize = 48.dp // Keeps every control at Android's accessible minimum target.
+    Row(
+        modifier = modifier,
+        horizontalArrangement = Arrangement.SpaceEvenly,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Keep the short landscape row readable. Secondary actions remain available in the
+        // portrait player and on larger wide panels, instead of squeezing primary transport.
+        if (!compact && state.shuffleAction != null) {
+            TransportButton(
+                ResonanceIcons.Shuffle,
+                "Shuffle",
+                true,
+                style,
+                onShuffle,
+                size = buttonSize,
+                liquidMotion = liquidMotion,
+            )
+        }
+        TransportButton(
+            ResonanceIcons.SkipPrevious,
+            "Previous",
+            state.canGoPrevious,
+            style,
+            onPrevious,
+            size = buttonSize,
+            liquidMotion = liquidMotion,
+        )
+        when (visualTheme) {
+            PlayerVisualTheme.FROSTED_GLASS -> FrostedHeroPlayButton(
+                state = state,
+                style = style,
+                onClick = onPlayPause,
+                size = if (compact) 52.dp else 64.dp,
+            )
+            PlayerVisualTheme.HI_FI_STUDIO -> ChromePlayButton(
+                state = state,
+                style = style,
+                onClick = onPlayPause,
+                size = if (compact) 52.dp else 64.dp,
+            )
+            PlayerVisualTheme.DUOTONE -> DuotonePlayButton(
+                state = state,
+                style = style,
+                onClick = onPlayPause,
+                size = if (compact) 52.dp else 64.dp,
+            )
+            else -> PlayPauseButton(
+                state = state,
+                style = style,
+                onClick = onPlayPause,
+                width = if (compact) 52.dp else 64.dp,
+                expressiveMotion = true,
+            )
+        }
+        TransportButton(
+            ResonanceIcons.SkipNext,
+            "Next",
+            state.canGoNext,
+            style,
+            onNext,
+            size = buttonSize,
+            liquidMotion = liquidMotion,
+        )
+        if (!compact && state.canLike) {
+            TransportButton(
+                if (state.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                if (state.isLiked) "Unlike" else "Like",
+                true,
+                style,
+                onLike,
+                size = buttonSize,
+                contentColor = if (state.isLiked) style.primaryContainer else style.foreground,
+                liquidMotion = liquidMotion,
             )
         }
     }
@@ -1094,6 +1521,7 @@ private fun PlaylistOverlay(
     state: ExternalMediaState,
     style: PlayerVisualStyle,
     frostedGlass: Boolean,
+    presentation: PlaylistPresentation,
     onDismiss: () -> Unit,
     onSelect: (PlaylistEntry) -> Unit,
     onOpenSourceApp: () -> Unit,
@@ -1116,13 +1544,25 @@ private fun PlaylistOverlay(
             .background(Color.Black.copy(alpha = if (frostedGlass) 0.30f else 0.45f))
             .clickable(onClick = onDismiss)
             .zIndex(8f),
-        contentAlignment = Alignment.BottomCenter,
+        contentAlignment = if (presentation == PlaylistPresentation.SIDE_PANEL) {
+            Alignment.CenterEnd
+        } else {
+            Alignment.BottomCenter
+        },
     ) {
         AnimatedVisibility(
             visible = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 78.dp),
+            modifier = if (presentation == PlaylistPresentation.SIDE_PANEL) {
+                Modifier
+                    .fillMaxWidth(0.52f)
+                    .widthIn(min = 320.dp, max = 480.dp)
+                    .fillMaxHeight()
+                    .padding(top = 28.dp, end = 18.dp, bottom = 28.dp)
+            } else {
+                Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 78.dp)
+            },
             enter = fadeIn(tween(120)) +
                 expandVertically(
                     animationSpec = tween(180, easing = FastOutSlowInEasing),
@@ -1141,7 +1581,15 @@ private fun PlaylistOverlay(
                 ),
         ) {
             Surface(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .then(
+                        if (presentation == PlaylistPresentation.SIDE_PANEL) {
+                            Modifier.fillMaxHeight()
+                        } else {
+                            Modifier
+                        },
+                    ),
                 color = Color.Transparent,
                 contentColor = style.foreground,
                 shape = sheetShape,
@@ -1179,7 +1627,17 @@ private fun PlaylistOverlay(
                                 },
                             ),
                     )
-                    Column(modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .then(
+                                if (presentation == PlaylistPresentation.SIDE_PANEL) {
+                                    Modifier.fillMaxHeight()
+                                } else {
+                                    Modifier
+                                },
+                            )
+                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                    ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -1224,7 +1682,13 @@ private fun PlaylistOverlay(
                             Text("Open in ${state.sourceApp}")
                         }
                     } else {
-                        LazyColumn(modifier = Modifier.heightIn(max = 300.dp)) {
+                        LazyColumn(
+                            modifier = if (presentation == PlaylistPresentation.SIDE_PANEL) {
+                                Modifier.weight(1f)
+                            } else {
+                                Modifier.heightIn(max = 300.dp)
+                            },
+                        ) {
                             items(state.playlist, key = { it.id }) { entry ->
                                 PlaylistRow(
                                     entry = entry,
@@ -1368,6 +1832,7 @@ private fun AndroidExpressiveLayout(
     state: ExternalMediaState,
     style: PlayerVisualStyle,
     compact: Boolean,
+    contentMaxWidth: Dp,
     modifier: Modifier,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -1377,7 +1842,14 @@ private fun AndroidExpressiveLayout(
     onLike: () -> Unit,
     onShuffle: () -> Unit,
 ) {
-    Column(modifier = modifier.padding(horizontal = 16.dp)) {
+    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = contentMaxWidth)
+                .fillMaxWidth()
+                .fillMaxHeight()
+                .padding(horizontal = 16.dp),
+        ) {
         AndroidExpressiveClock(style = style, compact = compact)
         Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
         AndroidExpressiveHero(
@@ -1421,6 +1893,7 @@ private fun AndroidExpressiveLayout(
         )
         Spacer(Modifier.weight(1f))
         Spacer(Modifier.height(12.dp))
+        }
     }
 }
 
@@ -2092,10 +2565,18 @@ private fun AndroidExpressiveEmptyLayout(
     state: ExternalMediaState,
     style: PlayerVisualStyle,
     compact: Boolean,
+    contentMaxWidth: Dp,
     modifier: Modifier,
 ) {
     val shape = RoundedCornerShape(36.dp)
-    Column(modifier = modifier.padding(horizontal = 16.dp)) {
+    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = contentMaxWidth)
+                .fillMaxWidth()
+                .fillMaxHeight()
+                .padding(horizontal = 16.dp),
+        ) {
         AndroidExpressiveClock(style = style, compact = compact)
         Spacer(Modifier.height(if (compact) 16.dp else 28.dp))
         Box(
@@ -2182,6 +2663,7 @@ private fun AndroidExpressiveEmptyLayout(
         }
         Spacer(Modifier.weight(1f))
         Spacer(Modifier.height(8.dp))
+        }
     }
 }
 
@@ -2190,6 +2672,7 @@ private fun iOSGlassLayout(
     state: ExternalMediaState,
     style: PlayerVisualStyle,
     compact: Boolean,
+    contentMaxWidth: Dp,
     modifier: Modifier,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -2211,10 +2694,11 @@ private fun iOSGlassLayout(
         animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 480f),
         label = "artwork enter scale",
     )
+    val ambientMotion = rememberAmbientMotionEnabled(state.isPlaying && !state.isBuffering)
     val floatTransition = rememberInfiniteTransition(label = "glass float")
     val heroBob by floatTransition.animateFloat(
         initialValue = -1f,
-        targetValue = 1f,
+        targetValue = if (ambientMotion) 1f else -1f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 5200, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse,
@@ -2222,9 +2706,12 @@ private fun iOSGlassLayout(
         label = "hero bob",
     )
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
+    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
+        Column(
+            modifier = Modifier
+            .widthIn(max = contentMaxWidth)
+            .fillMaxWidth()
+            .fillMaxHeight()
             // Sit the Frosted stack slightly lower on the lock screen without
             // changing the shared clock/status-bar positioning.
             .padding(top = if (compact) 12.dp else 18.dp)
@@ -2324,6 +2811,7 @@ private fun iOSGlassLayout(
             VolumeControlRow(state, style, onVolumeChange, capsule = false, frostedGlass = true, showThumb = true)
         }
         Spacer(Modifier.height(12.dp))
+        }
     }
 }
 
@@ -2455,6 +2943,7 @@ private fun HiFiLayout(
     state: ExternalMediaState,
     style: PlayerVisualStyle,
     compact: Boolean,
+    contentMaxWidth: Dp,
     modifier: Modifier,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -2477,12 +2966,15 @@ private fun HiFiLayout(
         label = "hifi artwork scale",
     )
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(horizontal = 18.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
+    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = contentMaxWidth)
+                .fillMaxWidth()
+                .fillMaxHeight()
+                .padding(horizontal = 18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
         // Warm LED-style clock
         CoverLockClock(
             centered = true,
@@ -2618,6 +3110,7 @@ private fun HiFiLayout(
         }
         Spacer(Modifier.weight(1f))
         Spacer(Modifier.height(12.dp))
+        }
     }
 }
 
@@ -2747,10 +3240,11 @@ private fun HiFiVuMeter(
     // Amp envelope: a phase that only advances while playing, so the bars crawl
     // forward as the song plays. Each band is derived from this shared phase with
     // its own offset + speed so highs (left) and lows (right) dance independently.
+    val ambientMotion = rememberAmbientMotionEnabled(state.isPlaying && !state.isBuffering)
     val ampTransition = rememberInfiniteTransition(label = "hifi amp")
     val ampPhase by ampTransition.animateFloat(
         initialValue = 0f,
-        targetValue = (2f * Math.PI).toFloat(),
+        targetValue = if (ambientMotion) (2f * Math.PI).toFloat() else 0f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 1400, easing = LinearEasing),
             repeatMode = RepeatMode.Restart,
@@ -2852,6 +3346,7 @@ private fun DuotoneLayout(
     state: ExternalMediaState,
     style: PlayerVisualStyle,
     compact: Boolean,
+    contentMaxWidth: Dp,
     modifier: Modifier,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -2874,12 +3369,15 @@ private fun DuotoneLayout(
         label = "duotone artwork scale",
     )
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .padding(horizontal = 14.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
+    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = contentMaxWidth)
+                .fillMaxWidth()
+                .fillMaxHeight()
+                .padding(horizontal = 14.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
         // Editorial clock over the duotone wash
         CoverLockClock(centered = true, compact = compact, datePill = false)
         Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
@@ -2992,6 +3490,7 @@ private fun DuotoneLayout(
             }
         }
         Spacer(Modifier.height(12.dp))
+        }
     }
 }
 
@@ -3260,10 +3759,11 @@ private fun ThemedPositionSection(
         label = "waveform drag energy",
     )
     val progressInteraction = remember { MutableInteractionSource() }
+    val ambientMotion = rememberAmbientMotionEnabled(state.isPlaying && !state.isBuffering)
     val waveformTransition = rememberInfiniteTransition(label = "neon waveform motion")
     val waveformPhase by waveformTransition.animateFloat(
         initialValue = 0f,
-        targetValue = (Math.PI * 2.0).toFloat(),
+        targetValue = if (ambientMotion) (Math.PI * 2.0).toFloat() else 0f,
         animationSpec = infiniteRepeatable(
             animation = tween(
                 durationMillis = if (treatment == ProgressTreatment.EXPRESSIVE) 1000 else 1150,
@@ -3605,6 +4105,7 @@ private fun SourceCapsule(
 private fun PlaybackSignal(isPlaying: Boolean, color: Color) {
     // M3 Expressive: staggered looping bounce when playing, M3 fast spatial
     // spring settle to static bars when paused.
+    val ambientMotion = rememberAmbientMotionEnabled(isPlaying)
     val transition = rememberInfiniteTransition(label = "signal bars")
     val barConfigs = remember { listOf(
         Triple(9.dp, 5.dp, 0),      // bar 0: height, min, delay
@@ -3620,7 +4121,7 @@ private fun PlaybackSignal(isPlaying: Boolean, color: Color) {
             // Continuous looping phase when playing
             val loopPhase by transition.animateFloat(
                 initialValue = 0f,
-                targetValue = 1f,
+                targetValue = if (ambientMotion) 1f else 0f,
                 animationSpec = infiniteRepeatable(
                     animation = tween(
                         durationMillis = 600,
@@ -3843,12 +4344,17 @@ private fun VolumeControlRow(
     state: ExternalMediaState,
     style: PlayerVisualStyle,
     onVolumeChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
     capsule: Boolean = false,
     frostedGlass: Boolean = false,
     showThumb: Boolean = true,
 ) {
+    val rowModifier = if (capsule) Modifier else modifier
     val content: @Composable () -> Unit = {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = rowModifier,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Icon(
                 ResonanceIcons.VolumeUp,
                 contentDescription = "Music volume",
@@ -3868,7 +4374,7 @@ private fun VolumeControlRow(
     }
     if (capsule) {
         Surface(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = modifier.fillMaxWidth(),
             color = style.controlContainer,
             shape = RoundedCornerShape(50),
         ) {

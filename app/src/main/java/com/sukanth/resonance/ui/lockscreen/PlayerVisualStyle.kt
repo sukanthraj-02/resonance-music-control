@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.sukanth.resonance.lockscreen.PlayerVisualTheme
@@ -121,7 +122,7 @@ internal fun rememberPlayerVisualStyle(
                 badgeContainer = Color.Black.copy(alpha = 0.45f),
                 badgeContent = Color.White,
                 primaryContainer = primaryContainer,
-                primaryContent = Color.White,
+                primaryContent = primaryContainer.contrastContent(),
                 secondaryContainer = Color(0xFF89A7BF).copy(alpha = 0.18f),
                 secondaryContent = Color.White,
                 tertiaryContainer = tertiaryContainer,
@@ -171,7 +172,7 @@ internal fun rememberPlayerVisualStyle(
                 badgeContainer = Color(0xFF1C1714),
                 badgeContent = hifiPrimary.lifted(0.34f),
                 primaryContainer = hifiPrimary,
-                primaryContent = Color(0xFF181308),
+                primaryContent = hifiPrimary.contrastContent(),
                 secondaryContainer = hifiSecondary.scaled(0.58f),
                 secondaryContent = Color(0xFFF3EBDC),
                 tertiaryContainer = hifiSecondary.scaled(0.72f),
@@ -218,11 +219,11 @@ internal fun rememberPlayerVisualStyle(
                 badgeContainer = Color.Black.copy(alpha = 0.40f),
                 badgeContent = Color.White,
                 primaryContainer = coverPrimary.boldAccent(saturation = 1.15f, lift = 0.05f),
-                primaryContent = Color.White,
+                primaryContent = coverPrimary.boldAccent(saturation = 1.15f, lift = 0.05f).contrastContent(),
                 secondaryContainer = coverSecondary.boldAccent(saturation = 1.10f, lift = 0.05f).copy(alpha = 0.55f),
-                secondaryContent = Color.White,
+                secondaryContent = coverSecondary.boldAccent(saturation = 1.10f, lift = 0.05f).contrastContent(),
                 tertiaryContainer = coverSecondary.boldAccent(saturation = 1.0f, lift = 0.02f),
-                tertiaryContent = Color.White,
+                tertiaryContent = coverSecondary.boldAccent(saturation = 1.0f, lift = 0.02f).contrastContent(),
                 outline = Color.White.copy(alpha = 0.35f),
                 controlContainer = Color(0xFF14100F),
                 sliderInactive = Color.White.copy(alpha = 0.34f),
@@ -247,11 +248,11 @@ internal fun rememberPlayerVisualStyle(
                 badgeContainer = secondaryContainer,
                 badgeContent = Color.White,
                 primaryContainer = primaryContainer,
-                primaryContent = Color.White,
+                primaryContent = primaryContainer.contrastContent(),
                 secondaryContainer = secondaryContainer,
-                secondaryContent = Color.White,
+                secondaryContent = secondaryContainer.contrastContent(),
                 tertiaryContainer = tertiaryContainer,
-                tertiaryContent = Color.White,
+                tertiaryContent = tertiaryContainer.contrastContent(),
                 outline = colors.outlineVariant,
                 controlContainer = surfaceContainer,
                 sliderInactive = colors.onSurfaceVariant.copy(alpha = 0.38f),
@@ -295,3 +296,7 @@ private fun Color.boldAccent(saturation: Float, lift: Float): Color {
         alpha = alpha,
     ).lifted(lift)
 }
+
+/** Picks a high-contrast glyph color for a cover-derived accent surface. */
+private fun Color.contrastContent(): Color =
+    if (luminance() > 0.52f) Color(0xFF121418) else Color.White

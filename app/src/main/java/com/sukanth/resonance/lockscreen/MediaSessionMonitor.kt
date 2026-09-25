@@ -720,10 +720,7 @@ object MediaSessionMonitor {
         val playbackState = playback?.state ?: PlaybackState.STATE_NONE
         val isPlaybackActive = playbackState in ACTIVE_PLAYBACK_STATES
         val actions = playback?.actions ?: 0L
-        val safePlaybackSpeed = playback?.playbackSpeed
-            ?.takeIf { it.isFinite() }
-            ?.coerceIn(-MAX_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
-            ?: 0f
+        val safePlaybackSpeed = effectivePlaybackSpeed(playback?.playbackSpeed, playbackState)
         val next = current.copy(
             positionMs = playback?.estimatedPosition(current.durationMs) ?: current.positionMs,
             playbackSpeed = safePlaybackSpeed,
@@ -763,10 +760,7 @@ object MediaSessionMonitor {
         val playbackState = playback?.state ?: PlaybackState.STATE_NONE
         val isPlaying = playbackState == PlaybackState.STATE_PLAYING
         val isPlaybackActive = playbackState in ACTIVE_PLAYBACK_STATES
-        val safePlaybackSpeed = playback?.playbackSpeed
-            ?.takeIf { it.isFinite() }
-            ?.coerceIn(-MAX_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
-            ?: 0f
+        val safePlaybackSpeed = effectivePlaybackSpeed(playback?.playbackSpeed, playbackState)
         val estimatedPosition = playback?.estimatedPosition(duration) ?: 0L
         val artwork = sanitizedArtwork(metadata?.artwork())
         // Some Poweramp releases expose a queue that changes while the session is being
@@ -892,14 +886,22 @@ object MediaSessionMonitor {
             return basePosition.coerceIn(0L, durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE)
         }
         val elapsed = (SystemClock.elapsedRealtime() - lastPositionUpdateTime).coerceAtLeast(0L)
-        val safeSpeed = playbackSpeed
-            .takeIf { it.isFinite() }
-            ?.coerceIn(-MAX_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
-            ?: 0f
+        val safeSpeed = effectivePlaybackSpeed(playbackSpeed, state)
         return (basePosition + (elapsed * safeSpeed).toLong()).coerceIn(
             0L,
             durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE,
         )
+    }
+
+    /**
+     * Some players forget to report a playback speed (PlaybackState defaults it to 0). When the
+     * playback state is advancing we still want the position clock to move, so a missing/zero
+     * speed is normalized to 1x. Real negative speeds (rewind scrubbing) are preserved.
+     */
+    private fun effectivePlaybackSpeed(speed: Float?, state: Int): Float {
+        val raw = speed?.takeIf { it.isFinite() } ?: 0f
+        if (state in POSITION_ADVANCING_STATES && raw == 0f) return 1f
+        return raw.coerceIn(-MAX_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
     }
 
     private fun Int.isBufferingState(): Boolean =
