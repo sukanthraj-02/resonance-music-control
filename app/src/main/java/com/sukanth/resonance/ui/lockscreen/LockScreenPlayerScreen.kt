@@ -44,7 +44,6 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -139,32 +138,14 @@ import kotlinx.coroutines.launch
 import androidx.core.os.ConfigurationCompat
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
-import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-private enum class PlaylistPresentation {
-    BOTTOM_SHEET,
-    SIDE_PANEL,
-}
-
-/**
- * Width and height are both important on a lock screen: a landscape phone has a wide
- * canvas but very little vertical room, while a tablet needs a denser, more deliberate
- * composition than a stretched phone column.
- */
-private data class ResponsivePlayerLayout(
-    val wide: Boolean,
-    val compact: Boolean,
-    val contentMaxWidth: Dp,
-    val contentSideInset: Dp,
-    val showClock: Boolean,
-    val playlistPresentation: PlaylistPresentation,
-)
+/** Wall-clock cadence used to sweep themed playheads between media position callbacks. */
+private const val POSITION_TICK_MS = 100L
 
 /** Avoid continuously redrawing decorative motion on devices that ask for less work. */
 @Composable
@@ -268,30 +249,10 @@ fun LockScreenPlayerScreen(
                 )
             },
     ) {
-        // The background may use the whole display, but player controls must react to both axes.
-        // Tablets/foldables and landscape phones use a two-column player; portrait phones retain
-        // the compact vertical composition. This avoids both stretched tabs and dead space.
-        val isLandscape = maxWidth > maxHeight
-        val wideLayout = maxWidth >= 600.dp || (isLandscape && maxWidth >= 480.dp)
-        val compact =
-            maxHeight < (if (visualTheme == PlayerVisualTheme.FROSTED_GLASS) 840.dp else 760.dp) ||
-                isLandscape
-        val contentMaxWidth = minOf(maxWidth, if (wideLayout) 960.dp else 560.dp)
-        val contentSideInset = ((maxWidth - contentMaxWidth) / 2).coerceAtLeast(0.dp)
-        val responsiveLayout = ResponsivePlayerLayout(
-            wide = wideLayout,
-            compact = compact,
-            contentMaxWidth = contentMaxWidth,
-            contentSideInset = contentSideInset,
-            // A clock is useful on a tablet and phone portrait. On short landscape displays it
-            // competes with music controls, so the artwork/control split gets that room instead.
-            showClock = !isLandscape || maxHeight >= 600.dp,
-            playlistPresentation = if (wideLayout) {
-                PlaylistPresentation.SIDE_PANEL
-            } else {
-                PlaylistPresentation.BOTTOM_SHEET
-            },
-        )
+        // A single metrics pass drives every theme. It accounts for both axes so a tall
+        // phone, a short phone, a tablet, a foldable, landscape, and a resized split-screen
+        // window each resolve to a deliberate composition instead of a stretched phone column.
+        val metrics = playerLayoutMetrics(maxWidth, maxHeight)
         ThemeBackdrop(
             state = state,
             visualTheme = visualTheme,
@@ -304,7 +265,7 @@ fun LockScreenPlayerScreen(
             state = state,
             visualTheme = visualTheme,
             style = visualStyle,
-            responsiveLayout = responsiveLayout,
+            metrics = metrics,
             modifier = Modifier
                 .fillMaxSize()
                 // Status/navigation padding covers ordinary phones; cutout padding also protects
@@ -314,7 +275,7 @@ fun LockScreenPlayerScreen(
                 .navigationBarsPadding()
                 // Reserve a clean bottom rail for the playlist split button so it never
                 // overlaps the volume surface or the system gesture area.
-                .padding(bottom = if (wideLayout) 64.dp else 76.dp)
+                .padding(bottom = if (metrics.wide) 64.dp else 76.dp)
                 .graphicsLayer {
                     alpha = contentAlpha
                     scaleX = contentScale
@@ -337,7 +298,7 @@ fun LockScreenPlayerScreen(
                 state = state,
                 style = visualStyle,
                 frostedGlass = visualTheme == PlayerVisualTheme.FROSTED_GLASS,
-                presentation = responsiveLayout.playlistPresentation,
+                presentation = metrics.playlistPresentation,
                 onDismiss = { playlistVisible = false },
                 onSelect = { entry ->
                     onPlaylistItemSelected(entry)
@@ -355,7 +316,7 @@ fun LockScreenPlayerScreen(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .navigationBarsPadding()
-                .padding(end = responsiveLayout.contentSideInset + 16.dp, bottom = playlistBottomPadding)
+                .padding(end = metrics.contentSideInset + 16.dp, bottom = playlistBottomPadding)
                 .zIndex(9f),
         )
 
@@ -387,7 +348,7 @@ fun LockScreenPlayerScreen(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .navigationBarsPadding()
-                .padding(start = responsiveLayout.contentSideInset + 16.dp, bottom = playlistBottomPadding)
+                .padding(start = metrics.contentSideInset + 16.dp, bottom = playlistBottomPadding)
                 .zIndex(10f),
         ) {
             Surface(
@@ -698,7 +659,7 @@ private fun ThemePlayerLayout(
     state: ExternalMediaState,
     visualTheme: PlayerVisualTheme,
     style: PlayerVisualStyle,
-    responsiveLayout: ResponsivePlayerLayout,
+    metrics: PlayerLayoutMetrics,
     modifier: Modifier,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -712,18 +673,17 @@ private fun ThemePlayerLayout(
         AndroidExpressiveEmptyLayout(
             state = state,
             style = style,
-            compact = responsiveLayout.compact,
-            contentMaxWidth = responsiveLayout.contentMaxWidth,
+            compact = metrics.compact,
+            contentMaxWidth = metrics.contentMaxWidth,
             modifier = modifier,
         )
         return
     }
-    if (responsiveLayout.wide) {
-        ResponsiveWidePlayerLayout(
+    when (visualTheme) {
+        PlayerVisualTheme.FROSTED_GLASS -> FrostedGlassLayout(
             state = state,
-            visualTheme = visualTheme,
             style = style,
-            responsiveLayout = responsiveLayout,
+            metrics = metrics,
             modifier = modifier,
             onPlayPause = onPlayPause,
             onPrevious = onPrevious,
@@ -733,72 +693,65 @@ private fun ThemePlayerLayout(
             onLike = onLike,
             onShuffle = onShuffle,
         )
-        return
-    }
-    when (visualTheme) {
-        PlayerVisualTheme.FROSTED_GLASS -> {
-            iOSGlassLayout(
-                state = state,
-                style = style,
-                compact = responsiveLayout.compact,
-                contentMaxWidth = responsiveLayout.contentMaxWidth,
-                modifier = modifier,
-                onPlayPause = onPlayPause,
-                onPrevious = onPrevious,
-                onNext = onNext,
-                onSeek = onSeek,
-                onVolumeChange = onVolumeChange,
-                onLike = onLike,
-                onShuffle = onShuffle,
-            )
-        }
-        PlayerVisualTheme.HI_FI_STUDIO -> {
-            HiFiLayout(
-                state = state,
-                style = style,
-                compact = responsiveLayout.compact,
-                contentMaxWidth = responsiveLayout.contentMaxWidth,
-                modifier = modifier,
-                onPlayPause = onPlayPause,
-                onPrevious = onPrevious,
-                onNext = onNext,
-                onSeek = onSeek,
-                onVolumeChange = onVolumeChange,
-                onLike = onLike,
-                onShuffle = onShuffle,
-            )
-        }
-        PlayerVisualTheme.DUOTONE -> {
-            DuotoneLayout(
-                state = state,
-                style = style,
-                compact = responsiveLayout.compact,
-                contentMaxWidth = responsiveLayout.contentMaxWidth,
-                modifier = modifier,
-                onPlayPause = onPlayPause,
-                onPrevious = onPrevious,
-                onNext = onNext,
-                onSeek = onSeek,
-                onVolumeChange = onVolumeChange,
-                onLike = onLike,
-                onShuffle = onShuffle,
-            )
-        }
+        PlayerVisualTheme.HI_FI_STUDIO -> HiFiStudioLayout(
+            state = state,
+            style = style,
+            metrics = metrics,
+            modifier = modifier,
+            onPlayPause = onPlayPause,
+            onPrevious = onPrevious,
+            onNext = onNext,
+            onSeek = onSeek,
+            onVolumeChange = onVolumeChange,
+            onLike = onLike,
+            onShuffle = onShuffle,
+        )
+        PlayerVisualTheme.DUOTONE -> DuotoneCanvasLayout(
+            state = state,
+            style = style,
+            metrics = metrics,
+            modifier = modifier,
+            onPlayPause = onPlayPause,
+            onPrevious = onPrevious,
+            onNext = onNext,
+            onSeek = onSeek,
+            onVolumeChange = onVolumeChange,
+            onLike = onLike,
+            onShuffle = onShuffle,
+        )
         else -> {
-            AndroidExpressiveLayout(
-                state = state,
-                style = style,
-                compact = responsiveLayout.compact,
-                contentMaxWidth = responsiveLayout.contentMaxWidth,
-                modifier = modifier,
-                onPlayPause = onPlayPause,
-                onPrevious = onPrevious,
-                onNext = onNext,
-                onSeek = onSeek,
-                onVolumeChange = onVolumeChange,
-                onLike = onLike,
-                onShuffle = onShuffle,
-            )
+            // Material 3 Expressive keeps its own independent, already-tuned routing.
+            if (metrics.wide) {
+                ResponsiveWidePlayerLayout(
+                    state = state,
+                    visualTheme = visualTheme,
+                    style = style,
+                    responsiveLayout = metrics,
+                    modifier = modifier,
+                    onPlayPause = onPlayPause,
+                    onPrevious = onPrevious,
+                    onNext = onNext,
+                    onSeek = onSeek,
+                    onVolumeChange = onVolumeChange,
+                    onLike = onLike,
+                    onShuffle = onShuffle,
+                )
+            } else {
+                AndroidExpressiveLayout(
+                    state = state,
+                    style = style,
+                    compact = metrics.compact,
+                    contentMaxWidth = metrics.contentMaxWidth,
+                    modifier = modifier,
+                    onPlayPause = onPlayPause,
+                    onPrevious = onPrevious,
+                    onNext = onNext,
+                    onSeek = onSeek,
+                    onVolumeChange = onVolumeChange,
+                    onLike = onLike,
+                    onShuffle = onShuffle,
+                )
+            }
         }
     }
 }
@@ -808,7 +761,7 @@ private fun ResponsiveWidePlayerLayout(
     state: ExternalMediaState,
     visualTheme: PlayerVisualTheme,
     style: PlayerVisualStyle,
-    responsiveLayout: ResponsivePlayerLayout,
+    responsiveLayout: PlayerLayoutMetrics,
     modifier: Modifier,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -827,19 +780,6 @@ private fun ResponsiveWidePlayerLayout(
                 .fillMaxHeight()
                 .padding(horizontal = if (responsiveLayout.compact) 16.dp else 24.dp),
         ) {
-            if (responsiveLayout.showClock) {
-                if (visualTheme == PlayerVisualTheme.MATERIAL_3_EXPRESSIVE) {
-                    AndroidExpressiveClock(style = style, compact = true)
-                } else {
-                    CoverLockClock(
-                        centered = false,
-                        compact = true,
-                        datePill = visualTheme == PlayerVisualTheme.FROSTED_GLASS,
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-            }
-
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1125,139 +1065,6 @@ private fun ResponsiveWideTransportControls(
                 size = buttonSize,
                 contentColor = if (state.isLiked) style.primaryContainer else style.foreground,
                 liquidMotion = liquidMotion,
-            )
-        }
-    }
-}
-
-@Composable
-private fun CoverLockClock(
-    modifier: Modifier = Modifier,
-    centered: Boolean = true,
-    compact: Boolean = false,
-    datePill: Boolean = false,
-) {
-    val context = LocalContext.current
-    val configuration = LocalConfiguration.current
-    val locale = ConfigurationCompat.getLocales(configuration)[0] ?: Locale.US
-    val timePattern = remember(context, locale) {
-        if (android.text.format.DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm"
-    }
-    val timeFormatter = remember(timePattern, locale) { SimpleDateFormat(timePattern, locale) }
-    val dateFormatter = remember(locale) { SimpleDateFormat("EEE, d MMM", locale) }
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-
-    LaunchedEffect(Unit) {
-        while (true) {
-            val delayToNextMinute = 60_000L - (System.currentTimeMillis() % 60_000L) + 40L
-            delay(delayToNextMinute)
-            now = System.currentTimeMillis()
-        }
-    }
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(top = 20.dp),
-        horizontalAlignment = if (centered) Alignment.CenterHorizontally else Alignment.Start,
-    ) {
-        Text(
-            text = timeFormatter.format(Date(now)),
-            color = Color.White,
-            fontSize = if (compact) 50.sp else 58.sp,
-            fontWeight = FontWeight.Normal,
-            letterSpacing = (-2).sp,
-            textAlign = if (centered) TextAlign.Center else TextAlign.Start,
-        )
-        if (datePill) {
-            Surface(
-                color = Color.White.copy(alpha = 0.14f),
-                contentColor = Color.White,
-                shape = RoundedCornerShape(50),
-            ) {
-                Text(
-                    text = dateFormatter.format(Date(now)),
-                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 5.dp),
-                    style = MaterialTheme.typography.labelMedium,
-                )
-            }
-        } else {
-            Text(
-                text = dateFormatter.format(Date(now)),
-                color = Color.White.copy(alpha = 0.80f),
-                style = MaterialTheme.typography.titleSmall,
-                textAlign = if (centered) TextAlign.Center else TextAlign.Start,
-            )
-        }
-    }
-}
-
-@Composable
-private fun AndroidExpressiveClock(
-    style: PlayerVisualStyle,
-    compact: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val context = LocalContext.current
-    val configuration = LocalConfiguration.current
-    val locale = ConfigurationCompat.getLocales(configuration)[0] ?: Locale.US
-    val timePattern = remember(context, locale) {
-        if (android.text.format.DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm"
-    }
-    val timeFormatter = remember(timePattern, locale) { SimpleDateFormat(timePattern, locale) }
-    val weekdayFormatter = remember(locale) { SimpleDateFormat("EEEE", locale) }
-    val dateFormatter = remember(locale) { SimpleDateFormat("d MMM", locale) }
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-
-    LaunchedEffect(Unit) {
-        while (true) {
-            val delayToNextMinute = 60_000L - (System.currentTimeMillis() % 60_000L) + 40L
-            delay(delayToNextMinute)
-            now = System.currentTimeMillis()
-        }
-    }
-
-    // Subtle cover-color tint blended into white for the clock display
-    val clockColor = style.foreground.copy(
-        red = style.foreground.red * 0.92f + style.primaryContainer.red * 0.08f,
-        green = style.foreground.green * 0.92f + style.primaryContainer.green * 0.08f,
-        blue = style.foreground.blue * 0.92f + style.primaryContainer.blue * 0.08f,
-    )
-
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(top = if (compact) 10.dp else 14.dp),
-    ) {
-        Text(
-            text = timeFormatter.format(Date(now)),
-            color = clockColor,
-            fontSize = if (compact) 52.sp else 64.sp,
-            fontWeight = FontWeight.ExtraBold,
-            letterSpacing = (-3).sp,
-            lineHeight = if (compact) 54.sp else 66.sp,
-        )
-        Spacer(Modifier.height(2.dp))
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text(
-                text = weekdayFormatter.format(Date(now)),
-                color = style.secondaryForeground.copy(alpha = 0.80f),
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = "·",
-                color = style.secondaryForeground.copy(alpha = 0.40f),
-                style = MaterialTheme.typography.titleSmall,
-            )
-            Text(
-                text = dateFormatter.format(Date(now)),
-                color = style.secondaryForeground.copy(alpha = 0.80f),
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
             )
         }
     }
@@ -1849,9 +1656,8 @@ private fun AndroidExpressiveLayout(
                 .fillMaxWidth()
                 .fillMaxHeight()
                 .padding(horizontal = 16.dp),
+            verticalArrangement = if (compact) Arrangement.Top else Arrangement.Center,
         ) {
-        AndroidExpressiveClock(style = style, compact = compact)
-        Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
         AndroidExpressiveHero(
             state = state,
             style = style,
@@ -1891,8 +1697,7 @@ private fun AndroidExpressiveLayout(
             style = style,
             onVolumeChange = onVolumeChange,
         )
-        Spacer(Modifier.weight(1f))
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(if (compact) 24.dp else 14.dp))
         }
     }
 }
@@ -2576,9 +2381,8 @@ private fun AndroidExpressiveEmptyLayout(
                 .fillMaxWidth()
                 .fillMaxHeight()
                 .padding(horizontal = 16.dp),
+            verticalArrangement = if (compact) Arrangement.Top else Arrangement.Center,
         ) {
-        AndroidExpressiveClock(style = style, compact = compact)
-        Spacer(Modifier.height(if (compact) 16.dp else 28.dp))
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2661,18 +2465,16 @@ private fun AndroidExpressiveEmptyLayout(
                 }
             }
         }
-        Spacer(Modifier.weight(1f))
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(if (compact) 20.dp else 10.dp))
         }
     }
 }
 
 @Composable
-private fun iOSGlassLayout(
+private fun FrostedGlassLayout(
     state: ExternalMediaState,
     style: PlayerVisualStyle,
-    compact: Boolean,
-    contentMaxWidth: Dp,
+    metrics: PlayerLayoutMetrics,
     modifier: Modifier,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -2690,9 +2492,9 @@ private fun iOSGlassLayout(
         artworkSettled = true
     }
     val artworkEnterScale by animateFloatAsState(
-        targetValue = if (artworkSettled) 1f else 0.960f,
+        targetValue = if (artworkSettled) 1f else 0.96f,
         animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 480f),
-        label = "artwork enter scale",
+        label = "frosted artwork enter scale",
     )
     val ambientMotion = rememberAmbientMotionEnabled(state.isPlaying && !state.isBuffering)
     val floatTransition = rememberInfiniteTransition(label = "glass float")
@@ -2706,26 +2508,13 @@ private fun iOSGlassLayout(
         label = "hero bob",
     )
 
-    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
-        Column(
-            modifier = Modifier
-            .widthIn(max = contentMaxWidth)
-            .fillMaxWidth()
-            .fillMaxHeight()
-            // Sit the Frosted stack slightly lower on the lock screen without
-            // changing the shared clock/status-bar positioning.
-            .padding(top = if (compact) 12.dp else 18.dp)
-            .padding(horizontal = if (compact) 16.dp else 14.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        CoverLockClock(centered = true, compact = compact, datePill = true)
-        Spacer(Modifier.height(if (compact) 10.dp else 16.dp))
+    val scale = metrics.typeScale
+    val rhythm = metrics.spacingScale
+    val tight = metrics.tight
+
+    val artwork: @Composable (Modifier) -> Unit = { artModifier ->
         Box(
-            modifier = Modifier
-                // Give Frosted Glass a stronger hero presence and use the tall
-                // lock-screen canvas instead of leaving a large dead band.
-                .fillMaxWidth(if (compact) 0.80f else 0.88f)
-                .aspectRatio(1f)
+            modifier = artModifier
                 .graphicsLayer {
                     scaleX = artworkEnterScale
                     scaleY = artworkEnterScale
@@ -2749,60 +2538,82 @@ private fun iOSGlassLayout(
                 artworkSignature = state.artworkSignature,
                 style = style,
                 modifier = Modifier.fillMaxSize(),
-                elevation = 20.dp,
+                elevation = if (metrics.roomy) 22.dp else 16.dp,
             )
         }
-        Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
-        // The metadata intentionally floats on the canvas; there is no separate
-        // song-name tab in this version of Frosted Glass.
+    }
+
+    // Floating metadata: no enclosing tab, so it reads as part of the glass canvas.
+    val metadata: @Composable (Boolean) -> Unit = { centered ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp),
+            horizontalAlignment = if (centered) Alignment.CenterHorizontally else Alignment.Start,
         ) {
             Text(
                 state.title.ifBlank { "Nothing Playing" },
                 color = style.foreground,
-                style = MaterialTheme.typography.titleLarge,
+                fontSize = (24f * scale).sp,
+                lineHeight = (28f * scale).sp,
                 fontWeight = FontWeight.Bold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                textAlign = if (centered) TextAlign.Center else TextAlign.Start,
             )
             Spacer(Modifier.height(2.dp))
             Text(
                 state.artist.ifBlank { state.sourceApp.ifBlank { "Media" } },
                 color = style.secondaryForeground,
-                style = MaterialTheme.typography.bodyMedium,
+                fontSize = (14f * scale).sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                textAlign = if (centered) TextAlign.Center else TextAlign.Start,
             )
-            if (state.sourceApp.isNotBlank()) {
-                Spacer(Modifier.height(6.dp))
-                // A compact source badge is readable here without covering the
-                // album artwork or reintroducing the old full-width title tab.
-                SourceCapsule(state, style, minimal = true, uppercase = true)
-            }
         }
-        // Keep playback connected to the current song instead of allowing the
-        // tall lock-screen canvas to turn this into a large empty band.
-        Spacer(Modifier.height(if (compact) 20.dp else 28.dp))
-        // One continuous playback dock: time/seek rail and transport controls now
-        // share the same glass tab instead of reading as two unrelated surfaces.
-        FrostedGlassPanel(style, RoundedCornerShape(36.dp), Modifier.fillMaxWidth(), showShadow = false) {
+    }
+
+    // One continuous playback dock: time/seek rail and transport controls share the same glass tab.
+    val console: @Composable () -> Unit = {
+        FrostedGlassPanel(
+            style = style,
+            shape = RoundedCornerShape(if (tight) 30.dp else 34.dp),
+            modifier = Modifier.fillMaxWidth(),
+            compactHeight = tight,
+            showShadow = false,
+        ) {
             Column(Modifier.fillMaxWidth()) {
                 ThemedPositionSection(state, style, onSeek, ProgressTreatment.GLASS)
-                Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                    if (state.shuffleAction != null) TransportButton(ResonanceIcons.Shuffle, "Shuffle", true, style, onShuffle, size = 46.dp, liquidMotion = true)
-                    TransportButton(ResonanceIcons.SkipPrevious, "Previous", state.canGoPrevious, style, onPrevious, size = if (compact) 50.dp else 54.dp, liquidMotion = true)
-                    FrostedHeroPlayButton(state, style, onPlayPause, size = if (compact) 68.dp else 72.dp)
-                    TransportButton(ResonanceIcons.SkipNext, "Next", state.canGoNext, style, onNext, size = if (compact) 50.dp else 54.dp, liquidMotion = true)
-                    if (state.canLike) TransportButton(if (state.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder, if (state.isLiked) "Unlike" else "Like", true, style, onLike, size = 46.dp, contentColor = if (state.isLiked) style.primaryContainer else style.foreground, liquidMotion = true)
+                Spacer(Modifier.height((if (tight) 8 else 12).dp.rhythm(rhythm)))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val side = (52f * scale).dp
+                    val small = (46f * scale).dp
+                    if (state.shuffleAction != null) {
+                        TransportButton(ResonanceIcons.Shuffle, "Shuffle", true, style, onShuffle, size = small, liquidMotion = true)
+                    }
+                    TransportButton(ResonanceIcons.SkipPrevious, "Previous", state.canGoPrevious, style, onPrevious, size = side, liquidMotion = true)
+                    FrostedHeroPlayButton(state, style, onPlayPause, size = (72f * scale).dp)
+                    TransportButton(ResonanceIcons.SkipNext, "Next", state.canGoNext, style, onNext, size = side, liquidMotion = true)
+                    if (state.canLike) {
+                        TransportButton(
+                            if (state.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                            if (state.isLiked) "Unlike" else "Like",
+                            true, style, onLike,
+                            size = small,
+                            contentColor = if (state.isLiked) style.primaryContainer else style.foreground,
+                            liquidMotion = true,
+                        )
+                    }
                 }
             }
         }
-        Spacer(Modifier.height(if (compact) 4.dp else 8.dp))
-        // Keep the volume rail itself, but remove the extra enclosing tab.
+    }
+
+    val volume: @Composable () -> Unit = {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2810,7 +2621,75 @@ private fun iOSGlassLayout(
         ) {
             VolumeControlRow(state, style, onVolumeChange, capsule = false, frostedGlass = true, showThumb = true)
         }
-        Spacer(Modifier.height(12.dp))
+    }
+
+    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
+        if (metrics.split) {
+            // Landscape, tablet, and unfolded foldable: artwork and console sit side by side.
+            Row(
+                modifier = Modifier
+                    .widthIn(max = metrics.contentMaxWidth)
+                    .fillMaxWidth()
+                    .fillMaxHeight()
+                    .padding(horizontal = metrics.screenPadding),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy((if (tight) 18 else 28).dp.rhythm(rhythm)),
+            ) {
+                AdaptiveSquareArtwork(
+                    widthFraction = 0.96f,
+                    modifier = Modifier
+                        .weight(0.44f)
+                        .fillMaxHeight(),
+                    maxArtwork = 440.dp,
+                    minArtwork = 140.dp,
+                ) { side -> artwork(Modifier.size(side)) }
+                Column(
+                    modifier = Modifier
+                        .weight(0.56f)
+                        .fillMaxHeight(),
+                    horizontalAlignment = Alignment.Start,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    NowPlayingEyebrow(state, style, centered = false)
+                    Spacer(Modifier.height((if (tight) 8 else 14).dp.rhythm(rhythm)))
+                    metadata(false)
+                    Spacer(Modifier.height((if (tight) 10 else 18).dp.rhythm(rhythm)))
+                    console()
+                    Spacer(Modifier.height((if (tight) 6 else 10).dp.rhythm(rhythm)))
+                    volume()
+                }
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = metrics.contentMaxWidth)
+                    .fillMaxWidth()
+                    .fillMaxHeight()
+                    .padding(top = if (tight) 12.dp else 18.dp)
+                    .padding(horizontal = metrics.screenPadding),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = if (tight) Arrangement.Top else Arrangement.Center,
+            ) {
+                NowPlayingEyebrow(state, style, centered = true)
+                Spacer(Modifier.height((if (tight) 10 else 18).dp.rhythm(rhythm)))
+                // The weighted box absorbs leftover height, and the square is capped by
+                // that height so artwork can never clip on a short canvas.
+                AdaptiveSquareArtwork(
+                    widthFraction = metrics.artworkFraction,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    maxArtwork = if (metrics.roomy) 470.dp else 420.dp,
+                    minArtwork = 132.dp,
+                ) { side -> artwork(Modifier.size(side)) }
+                Spacer(Modifier.height((if (tight) 8 else 14).dp.rhythm(rhythm)))
+                metadata(true)
+                Spacer(Modifier.height((if (tight) 12 else 20).dp.rhythm(rhythm)))
+                console()
+                Spacer(Modifier.height((if (tight) 6 else 10).dp.rhythm(rhythm)))
+                volume()
+                Spacer(Modifier.height(10.dp))
+            }
         }
     }
 }
@@ -2939,11 +2818,10 @@ private fun FrostedHeroPlayButton(
 }
 
 @Composable
-private fun HiFiLayout(
+private fun HiFiStudioLayout(
     state: ExternalMediaState,
     style: PlayerVisualStyle,
-    compact: Boolean,
-    contentMaxWidth: Dp,
+    metrics: PlayerLayoutMetrics,
     modifier: Modifier,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -2966,150 +2844,214 @@ private fun HiFiLayout(
         label = "hifi artwork scale",
     )
 
-    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
-        Column(
-            modifier = Modifier
-                .widthIn(max = contentMaxWidth)
-                .fillMaxWidth()
-                .fillMaxHeight()
-                .padding(horizontal = 18.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-        // Warm LED-style clock
-        CoverLockClock(
-            centered = true,
-            compact = compact,
-            datePill = false,
-        )
-        Spacer(Modifier.height(if (compact) 10.dp else 16.dp))
+    val scale = metrics.typeScale
+    val rhythm = metrics.spacingScale
+    val tight = metrics.tight
+    val deckShape = style.cardShape
 
-        // ── Brushed-chrome vinyl deck ─────────────────────────────────────
+    val artworkBlock: @Composable (Modifier) -> Unit = { artModifier ->
+        Box(
+            modifier = artModifier
+                .graphicsLayer {
+                    scaleX = artworkEnterScale
+                    scaleY = artworkEnterScale
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            ArtworkPanel(
+                artwork = state.artwork,
+                artworkSignature = state.artworkSignature,
+                style = style,
+                modifier = Modifier.fillMaxSize(),
+                elevation = 6.dp,
+            )
+        }
+    }
+
+    val metadataBlock: @Composable () -> Unit = {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = state.title.ifBlank { "Nothing Playing" },
+                color = style.foreground,
+                fontSize = (24f * scale).sp,
+                lineHeight = (28f * scale).sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = state.artist.ifBlank { state.sourceApp.ifBlank { "Media" } },
+                color = style.secondaryForeground,
+                fontSize = (14f * scale).sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+
+    val vuBlock: @Composable () -> Unit = {
+        HiFiVuMeter(state = state, style = style, compact = tight, onSeek = onSeek)
+    }
+
+    val transportBlock: @Composable () -> Unit = {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            val side = (48f * scale).dp
+            val small = (44f * scale).dp
+            if (state.shuffleAction != null) {
+                TransportButton(ResonanceIcons.Shuffle, "Shuffle", true, style, onShuffle, size = small, liquidMotion = true)
+            }
+            TransportButton(ResonanceIcons.SkipPrevious, "Previous", state.canGoPrevious, style, onPrevious, size = side, liquidMotion = true)
+            ChromePlayButton(state = state, style = style, onClick = onPlayPause, size = (66f * scale).dp)
+            TransportButton(ResonanceIcons.SkipNext, "Next", state.canGoNext, style, onNext, size = side, liquidMotion = true)
+            if (state.canLike) {
+                TransportButton(
+                    icon = if (state.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
+                    description = if (state.isLiked) "Unlike" else "Like",
+                    enabled = true, style = style, onClick = onLike, size = small,
+                    contentColor = if (state.isLiked) Color(0xFFE8B873) else style.foreground,
+                    liquidMotion = true,
+                )
+            }
+        }
+    }
+
+    val volumeBlock: @Composable () -> Unit = {
         Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .shadow(
-                    elevation = 18.dp,
-                    shape = style.cardShape,
-                    ambientColor = style.shadowColor,
-                    spotColor = Color(0xFF3A3734),
-                ),
-            shape = style.cardShape,
+            modifier = Modifier.fillMaxWidth(),
             color = style.controlContainer,
-            border = androidx.compose.foundation.BorderStroke(style.borderWidth, style.cardBorder),
+            shape = RoundedCornerShape(50),
+            border = androidx.compose.foundation.BorderStroke(0.5.dp, style.cardBorder),
         ) {
-            Column(
-                modifier = Modifier.padding(if (compact) 14.dp else 18.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
+            Box(Modifier.padding(horizontal = 12.dp, vertical = 2.dp)) {
+                VolumeControlRow(
+                    state = state, style = style, onVolumeChange = onVolumeChange,
+                    capsule = false, frostedGlass = true, showThumb = true,
+                )
+            }
+        }
+    }
+
+    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
+        if (metrics.split) {
+            // Turntable + amplifier stack: vinyl deck on the left, control deck on the right.
+            Row(
+                modifier = Modifier
+                    .widthIn(max = metrics.contentMaxWidth)
+                    .fillMaxWidth()
+                    .fillMaxHeight()
+                    .padding(horizontal = metrics.screenPadding),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy((if (tight) 14 else 22).dp.rhythm(rhythm)),
             ) {
-                // Vinyl artwork — square, tight corners like a record sleeve
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1.15f)
-                        .graphicsLayer {
-                            scaleX = artworkEnterScale
-                            scaleY = artworkEnterScale
-                        },
-                    contentAlignment = Alignment.Center,
+                HiFiDeck(
+                    style = style,
+                    shape = deckShape,
+                    modifier = Modifier.weight(0.42f).fillMaxHeight(),
+                    padding = if (tight) 12.dp else 18.dp,
                 ) {
-                    ArtworkPanel(
-                        artwork = state.artwork,
-                        artworkSignature = state.artworkSignature,
-                        style = style,
+                    AdaptiveSquareArtwork(
+                        widthFraction = 0.98f,
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        maxArtwork = 440.dp,
+                        minArtwork = 132.dp,
+                    ) { side -> artworkBlock(Modifier.size(side)) }
+                }
+                HiFiDeck(
+                    style = style,
+                    shape = deckShape,
+                    modifier = Modifier.weight(0.58f).fillMaxHeight(),
+                    padding = if (tight) 14.dp else 20.dp,
+                ) {
+                    Column(
                         modifier = Modifier.fillMaxSize(),
-                        elevation = 6.dp,
-                    )
-                }
-                Spacer(Modifier.height(if (compact) 10.dp else 14.dp))
-
-                // Warm analog metadata readout
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    // The title owns the full line; the source badge lives below it
-                    // so a long song name cannot be covered or truncated early.
-                    Text(
-                        text = state.title.ifBlank { "Nothing Playing" },
-                        color = style.foreground,
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = state.artist.ifBlank { state.sourceApp.ifBlank { "Media" } },
-                        color = style.secondaryForeground,
-                        style = MaterialTheme.typography.bodyMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (state.sourceApp.isNotBlank()) {
-                        Spacer(Modifier.height(6.dp))
-                        SourceCapsule(state, style, minimal = true, uppercase = true)
-                    }
-                }
-
-                Spacer(Modifier.height(if (compact) 10.dp else 14.dp))
-
-                // Analog VU meters as the progress / level readout
-                HiFiVuMeter(state = state, style = style, compact = compact, onSeek = onSeek)
-
-                Spacer(Modifier.height(if (compact) 10.dp else 14.dp))
-
-                // Chrome transport dials
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (state.shuffleAction != null) {
-                        TransportButton(
-                            ResonanceIcons.Shuffle, "Shuffle", true, style, onShuffle,
-                            size = 44.dp, liquidMotion = true,
-                        )
-                    }
-                    TransportButton(
-                        ResonanceIcons.SkipPrevious, "Previous", state.canGoPrevious, style, onPrevious,
-                        size = 48.dp, liquidMotion = true,
-                    )
-                    ChromePlayButton(
-                        state = state, style = style, onClick = onPlayPause,
-                        size = if (compact) 60.dp else 66.dp,
-                    )
-                    TransportButton(
-                        ResonanceIcons.SkipNext, "Next", state.canGoNext, style, onNext,
-                        size = 48.dp, liquidMotion = true,
-                    )
-                    if (state.canLike) {
-                        TransportButton(
-                            icon = if (state.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
-                            description = if (state.isLiked) "Unlike" else "Like",
-                            enabled = true, style = style, onClick = onLike, size = 44.dp,
-                            contentColor = if (state.isLiked) Color(0xFFE8B873) else style.foreground,
-                            liquidMotion = true,
-                        )
-                    }
-                }
-
-                Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
-
-                // Brushed volume rail
-                Surface(
-                    modifier = Modifier.fillMaxWidth(),
-                    color = style.controlContainer,
-                    shape = RoundedCornerShape(50),
-                    border = androidx.compose.foundation.BorderStroke(0.5.dp, style.cardBorder),
-                ) {
-                    Box(Modifier.padding(horizontal = 12.dp, vertical = 2.dp)) {
-                        VolumeControlRow(
-                            state = state, style = style, onVolumeChange = onVolumeChange,
-                            capsule = false, frostedGlass = true, showThumb = true,
-                        )
+                        horizontalAlignment = Alignment.Start,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        NowPlayingEyebrow(state, style, centered = false)
+                        Spacer(Modifier.height((if (tight) 8 else 14).dp.rhythm(rhythm)))
+                        metadataBlock()
+                        Spacer(Modifier.height((if (tight) 10 else 16).dp.rhythm(rhythm)))
+                        vuBlock()
+                        Spacer(Modifier.height((if (tight) 10 else 16).dp.rhythm(rhythm)))
+                        transportBlock()
+                        Spacer(Modifier.height((if (tight) 8 else 12).dp.rhythm(rhythm)))
+                        volumeBlock()
                     }
                 }
             }
+        } else {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = metrics.contentMaxWidth)
+                    .fillMaxWidth()
+                    .fillMaxHeight()
+                    .padding(horizontal = metrics.screenPadding),
+                verticalArrangement = if (tight) Arrangement.Top else Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                NowPlayingEyebrow(state, style, centered = true)
+                Spacer(Modifier.height((if (tight) 8 else 14).dp.rhythm(rhythm)))
+                HiFiDeck(
+                    style = style,
+                    shape = deckShape,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    padding = if (tight) 14.dp else 18.dp,
+                ) {
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        AdaptiveSquareArtwork(
+                            widthFraction = if (metrics.roomy) 0.78f else metrics.artworkFraction,
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            maxArtwork = if (metrics.roomy) 430.dp else 400.dp,
+                            minArtwork = 120.dp,
+                        ) { side -> artworkBlock(Modifier.size(side)) }
+                        Spacer(Modifier.height((if (tight) 8 else 14).dp.rhythm(rhythm)))
+                        metadataBlock()
+                        Spacer(Modifier.height((if (tight) 8 else 14).dp.rhythm(rhythm)))
+                        vuBlock()
+                        Spacer(Modifier.height((if (tight) 8 else 14).dp.rhythm(rhythm)))
+                        transportBlock()
+                        Spacer(Modifier.height((if (tight) 8 else 12).dp.rhythm(rhythm)))
+                        volumeBlock()
+                    }
+                }
+                Spacer(Modifier.height((if (tight) 18 else 12).dp.rhythm(rhythm)))
+            }
         }
-        Spacer(Modifier.weight(1f))
-        Spacer(Modifier.height(12.dp))
+    }
+}
+
+/** The brushed-chassis surface shared by the Hi-Fi turntable and amplifier decks. */
+@Composable
+private fun HiFiDeck(
+    style: PlayerVisualStyle,
+    shape: androidx.compose.ui.graphics.Shape,
+    modifier: Modifier,
+    padding: Dp,
+    content: @Composable () -> Unit,
+) {
+    Surface(
+        modifier = modifier.shadow(
+            elevation = 18.dp,
+            shape = shape,
+            ambientColor = style.shadowColor,
+            spotColor = Color(0xFF3A3734),
+        ),
+        shape = shape,
+        color = style.controlContainer,
+        border = androidx.compose.foundation.BorderStroke(style.borderWidth, style.cardBorder),
+    ) {
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            content()
         }
     }
 }
@@ -3199,7 +3141,9 @@ private fun HiFiVuMeter(
         mutableFloatStateOf((anchoredPosition / maximum.toFloat()).coerceIn(0f, 1f))
     }
     var seekHoldUntilMs by remember(playbackKey) { mutableLongStateOf(0L) }
-    val playbackSpeed = state.playbackSpeed.takeIf { it.isFinite() }?.coerceIn(0f, 8f) ?: 0f
+    val playbackSpeed = (state.playbackSpeed.takeIf { it.isFinite() } ?: 0f)
+        .coerceIn(0f, 8f)
+        .let { if (it == 0f && state.isPlaying && !state.isBuffering) 1f else it }
     val isAdvancing = state.isPlaying && !state.isBuffering && playbackSpeed > 0f
 
     // The VU bars are a seek control, so their lit length must follow the song monotonically.
@@ -3215,7 +3159,7 @@ private fun HiFiVuMeter(
             anchoredPosition = when {
                 now < seekHoldUntilMs && abs(correction) > 1_200f -> projected
                 abs(correction) > 1_200f -> reported
-                else -> (projected + correction * 0.16f).coerceIn(0f, maximum.toFloat())
+                else -> (projected + correction * 0.5f).coerceIn(0f, maximum.toFloat())
             }
             anchorElapsedMs = now
             frameElapsedMs = now
@@ -3232,7 +3176,7 @@ private fun HiFiVuMeter(
     } else 0f).coerceIn(0f, maximum.toFloat())
     val fraction by animateFloatAsState(
         targetValue = (smoothPosition / maximum.toFloat()).coerceIn(0f, 1f),
-        animationSpec = tween(durationMillis = 90, easing = LinearEasing),
+        animationSpec = tween(durationMillis = 140, easing = LinearEasing),
         label = "hifi song position",
     )
     LaunchedEffect(fraction, isDragging) { if (!isDragging) dragFraction = fraction }
@@ -3338,15 +3282,29 @@ private fun HiFiVuMeter(
             ),
         )
     }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            text = formatPlaybackTime(
+                ((if (isDragging) dragFraction else fraction) * maximum.toFloat()).toLong(),
+            ),
+            color = style.secondaryForeground,
+            fontSize = 11.sp,
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = formatPlaybackTime(state.durationMs),
+            color = style.secondaryForeground,
+            fontSize = 11.sp,
+        )
+    }
 }
 
 /** Spotify-style duotone editorial canvas: bold artwork + type + rounded pills. */
 @Composable
-private fun DuotoneLayout(
+private fun DuotoneCanvasLayout(
     state: ExternalMediaState,
     style: PlayerVisualStyle,
-    compact: Boolean,
-    contentMaxWidth: Dp,
+    metrics: PlayerLayoutMetrics,
     modifier: Modifier,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -3369,24 +3327,13 @@ private fun DuotoneLayout(
         label = "duotone artwork scale",
     )
 
-    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
-        Column(
-            modifier = Modifier
-                .widthIn(max = contentMaxWidth)
-                .fillMaxWidth()
-                .fillMaxHeight()
-                .padding(horizontal = 14.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-        // Editorial clock over the duotone wash
-        CoverLockClock(centered = true, compact = compact, datePill = false)
-        Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
+    val scale = metrics.typeScale
+    val rhythm = metrics.spacingScale
+    val tight = metrics.tight
 
-        // Full-bleed duotone hero artwork
+    val artworkBlock: @Composable (Modifier) -> Unit = { artModifier ->
         Box(
-            modifier = Modifier
-                .fillMaxWidth(if (compact) 0.86f else 0.92f)
-                .aspectRatio(1f)
+            modifier = artModifier
                 .graphicsLayer {
                     scaleX = artworkEnterScale
                     scaleY = artworkEnterScale
@@ -3403,79 +3350,71 @@ private fun DuotoneLayout(
                 elevation = 4.dp,
             )
         }
+    }
 
-        Spacer(Modifier.height(if (compact) 10.dp else 14.dp))
-
-        // Bold editorial metadata centered
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    val metadataBlock: @Composable (Boolean) -> Unit = { centered ->
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = if (centered) Alignment.CenterHorizontally else Alignment.Start,
+        ) {
             Text(
                 text = state.title.ifBlank { "Nothing Playing" },
                 color = style.foreground,
-                style = MaterialTheme.typography.headlineSmall,
+                fontSize = (26f * scale).sp,
+                lineHeight = (30f * scale).sp,
                 fontWeight = FontWeight.ExtraBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                textAlign = if (centered) TextAlign.Center else TextAlign.Start,
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(2.dp))
             Text(
                 text = state.artist.ifBlank { state.sourceApp.ifBlank { "Media" } },
                 color = style.secondaryForeground,
-                style = MaterialTheme.typography.bodyLarge,
+                fontSize = (16f * scale).sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                textAlign = if (centered) TextAlign.Center else TextAlign.Start,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
+    }
 
-        Spacer(Modifier.height(if (compact) 8.dp else 12.dp))
-
-        // Gradient wash progress
+    val progressBlock: @Composable () -> Unit = {
         ThemedPositionSection(
             state = state, style = style, onSeek = onSeek,
-            treatment = ProgressTreatment.EDITORIAL,
+            treatment = ProgressTreatment.VINYL,
         )
+    }
 
-        Spacer(Modifier.weight(1f))
-
-        // Rounded transport pills
+    val transportBlock: @Composable () -> Unit = {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            val side = (48f * scale).dp
+            val small = (46f * scale).dp
             if (state.shuffleAction != null) {
-                TransportButton(
-                    ResonanceIcons.Shuffle, "Shuffle", true, style, onShuffle,
-                    size = 46.dp, liquidMotion = true,
-                )
+                TransportButton(ResonanceIcons.Shuffle, "Shuffle", true, style, onShuffle, size = small, liquidMotion = true)
             }
-            TransportButton(
-                ResonanceIcons.SkipPrevious, "Previous", state.canGoPrevious, style, onPrevious,
-                size = 48.dp, liquidMotion = true,
-            )
-            DuotonePlayButton(
-                state = state, style = style, onClick = onPlayPause,
-                size = if (compact) 64.dp else 70.dp,
-            )
-            TransportButton(
-                ResonanceIcons.SkipNext, "Next", state.canGoNext, style, onNext,
-                size = 48.dp, liquidMotion = true,
-            )
+            TransportButton(ResonanceIcons.SkipPrevious, "Previous", state.canGoPrevious, style, onPrevious, size = side, liquidMotion = true)
+            DuotonePlayButton(state = state, style = style, onClick = onPlayPause, size = (70f * scale).dp)
+            TransportButton(ResonanceIcons.SkipNext, "Next", state.canGoNext, style, onNext, size = side, liquidMotion = true)
             if (state.canLike) {
                 TransportButton(
                     icon = if (state.isLiked) Icons.Rounded.Favorite else Icons.Rounded.FavoriteBorder,
                     description = if (state.isLiked) "Unlike" else "Like",
-                    enabled = true, style = style, onClick = onLike, size = 46.dp,
+                    enabled = true, style = style, onClick = onLike, size = small,
                     contentColor = if (state.isLiked) style.primaryContainer else style.foreground,
                     liquidMotion = true,
                 )
             }
         }
+    }
 
-        Spacer(Modifier.height(if (compact) 6.dp else 10.dp))
-
-        // Duotone gradient volume wash
+    val volumeBlock: @Composable () -> Unit = {
         Surface(
             modifier = Modifier.fillMaxWidth(),
             color = style.controlContainer,
@@ -3489,7 +3428,75 @@ private fun DuotoneLayout(
                 )
             }
         }
-        Spacer(Modifier.height(12.dp))
+    }
+
+    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
+        if (metrics.split) {
+            Row(
+                modifier = Modifier
+                    .widthIn(max = metrics.contentMaxWidth)
+                    .fillMaxWidth()
+                    .fillMaxHeight()
+                    .padding(horizontal = metrics.screenPadding),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy((if (tight) 18 else 28).dp.rhythm(rhythm)),
+            ) {
+                AdaptiveSquareArtwork(
+                    widthFraction = 0.96f,
+                    modifier = Modifier
+                        .weight(0.44f)
+                        .fillMaxHeight(),
+                    maxArtwork = 440.dp,
+                    minArtwork = 140.dp,
+                ) { side -> artworkBlock(Modifier.size(side)) }
+                Column(
+                    modifier = Modifier
+                        .weight(0.56f)
+                        .fillMaxHeight(),
+                    horizontalAlignment = Alignment.Start,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    NowPlayingEyebrow(state, style, centered = false)
+                    Spacer(Modifier.height((if (tight) 8 else 14).dp.rhythm(rhythm)))
+                    metadataBlock(false)
+                    Spacer(Modifier.height((if (tight) 10 else 14).dp.rhythm(rhythm)))
+                    progressBlock()
+                    Spacer(Modifier.height((if (tight) 10 else 16).dp.rhythm(rhythm)))
+                    transportBlock()
+                    Spacer(Modifier.height((if (tight) 8 else 12).dp.rhythm(rhythm)))
+                    volumeBlock()
+                }
+            }
+        } else {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = metrics.contentMaxWidth)
+                    .fillMaxWidth()
+                    .fillMaxHeight()
+                    .padding(horizontal = metrics.screenPadding),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = if (tight) Arrangement.Top else Arrangement.Center,
+            ) {
+                NowPlayingEyebrow(state, style, centered = true)
+                Spacer(Modifier.height((if (tight) 8 else 12).dp.rhythm(rhythm)))
+                AdaptiveSquareArtwork(
+                    widthFraction = metrics.artworkFraction,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    maxArtwork = if (metrics.roomy) 460.dp else 430.dp,
+                    minArtwork = 130.dp,
+                ) { side -> artworkBlock(Modifier.size(side)) }
+                Spacer(Modifier.height((if (tight) 10 else 14).dp.rhythm(rhythm)))
+                metadataBlock(true)
+                Spacer(Modifier.height((if (tight) 8 else 12).dp.rhythm(rhythm)))
+                progressBlock()
+                Spacer(Modifier.height((if (tight) 10 else 16).dp.rhythm(rhythm)))
+                transportBlock()
+                Spacer(Modifier.height((if (tight) 6 else 10).dp.rhythm(rhythm)))
+                volumeBlock()
+                Spacer(Modifier.height(10.dp))
+            }
         }
     }
 }
@@ -3685,6 +3692,7 @@ private enum class ProgressTreatment {
     GLASS,
     EXPRESSIVE,
     EDITORIAL,
+    VINYL,
 }
 
 @Composable
@@ -3701,10 +3709,22 @@ private fun ThemedPositionSection(
     }
     LaunchedEffect(state.positionMs, state.playbackSpeed, state.isPlaybackActive, maximum) {
         livePosition = state.positionMs.coerceIn(0L, maximum)
-        val speed = state.playbackSpeed.takeIf { it.isFinite() } ?: 0f
-        while (state.isPlaybackActive && speed != 0f) {
-            delay(250L)
-            livePosition = (livePosition + (250L * speed).toLong()).coerceIn(0L, maximum)
+        val speed = state.playbackSpeed
+            .takeIf { it.isFinite() }
+            ?.coerceIn(0f, 8f)
+            ?.let { if (it == 0f && state.isPlaying && !state.isBuffering) 1f else it }
+            ?: 0f
+        if (state.isPlaybackActive && speed != 0f) {
+            // Advance the playhead on a fixed wall-clock so it sweeps continuously even when the
+            // media session does not re-announce its position; pauses freeze it in place.
+            var lastAt = SystemClock.elapsedRealtime()
+            while (state.isPlaybackActive && speed != 0f) {
+                delay(POSITION_TICK_MS)
+                val now = SystemClock.elapsedRealtime()
+                val elapsedMs = (now - lastAt).coerceIn(0L, 600L)
+                livePosition = (livePosition + (elapsedMs * speed).toLong()).coerceIn(0L, maximum)
+                lastAt = now
+            }
         }
     }
     val animatedPosition by animateFloatAsState(
@@ -3717,6 +3737,10 @@ private fun ThemedPositionSection(
                 easing = LinearEasing,
             )
             ProgressTreatment.GLASS -> ResonanceTokens.Motion.liquidInteractive
+            ProgressTreatment.VINYL -> tween(
+                durationMillis = 200,
+                easing = LinearEasing,
+            )
             else -> spring(dampingRatio = 0.6f, stiffness = 700f)
         },
         label = "themed playback progress",
@@ -3775,6 +3799,7 @@ private fun ThemedPositionSection(
     )
     val railHeight = when (treatment) {
         ProgressTreatment.EXPRESSIVE -> 56.dp
+        ProgressTreatment.VINYL -> 36.dp
         else -> 28.dp
     }
 
@@ -3783,102 +3808,167 @@ private fun ThemedPositionSection(
             androidx.compose.foundation.Canvas(Modifier.matchParentSize()) {
                 val centerY = size.height / 2f
                 val activeX = size.width * fraction
-                // Material 3 Expressive's determinate wavy indicator is flat for
-                // the first 10% and last 5% of progress, then uses its full wave.
-                // This keeps the beginning visibly straight while the played
-                // portion becomes the animated zig-zag.
-                val waveReveal = if (treatment == ProgressTreatment.EXPRESSIVE) {
-                    expressiveWaveReveal
-                } else if (treatment == ProgressTreatment.GLASS) {
-                    // Liquid Glass uses Apple's quiet capsule rail; the
-                    // expressive wave belongs only to the M3 treatment.
-                    0f
-                } else {
-                    ((fraction - 0.01f) / 0.24f).coerceIn(0f, 1f)
-                }
-                val amplitude = when (treatment) {
-                    ProgressTreatment.GLASS -> 0f
-                    // M3 Expressive linear wavy indicator token.
-                    ProgressTreatment.EXPRESSIVE -> 4.dp.toPx()
-                    ProgressTreatment.EDITORIAL -> 2.5.dp.toPx()
-                } * waveReveal * (1f + dragEnergy * 0.35f) * (if (state.isPlaying) 1f else 0f)
-                val thickness = when (treatment) {
-                    ProgressTreatment.GLASS -> 2.5.dp.toPx()
-                    // M3 Expressive linear indicator active and track thickness.
-                    ProgressTreatment.EXPRESSIVE -> 5.dp.toPx()
-                    ProgressTreatment.EDITORIAL -> 2.dp.toPx()
-                }
-                val phase = if (state.isPlaying) waveformPhase else 0f
-                val cycles = when (treatment) {
-                    ProgressTreatment.GLASS -> 4.5f
-                    ProgressTreatment.EXPRESSIVE -> 5f
-                    ProgressTreatment.EDITORIAL -> 4f
-                }
-                val expressiveWavelengthPx = 40.dp.toPx()
-                fun snakeY(x: Float): Float {
-                    val angle = if (treatment == ProgressTreatment.EXPRESSIVE) {
-                        (x / expressiveWavelengthPx.coerceAtLeast(1f)) *
-                            (Math.PI * 2.0).toFloat() + phase
-                    } else {
-                        (x / size.width.coerceAtLeast(1f)) *
-                            (Math.PI * cycles).toFloat() + phase
+                if (treatment == ProgressTreatment.VINYL) {
+                    // Editorial vinyl groove: a bold rounded capsule rail with a duotone
+                    // gradient fill and an inset pill thumb that reads like a record player.
+                    val trackH = 6.dp.toPx()
+                    val trackY = centerY - trackH / 2f
+                    val thumbW = (if (isDragging) 10.dp else 7.dp).toPx()
+                    val thumbH = (if (isDragging) 26.dp else 20.dp).toPx()
+                    val thumbX = activeX.coerceIn(thumbW / 2f, size.width - thumbW / 2f)
+                    if (isDragging) {
+                        // Soft halo behind the thumb while scrubbing.
+                        drawRoundRect(
+                            color = style.primaryContainer.copy(alpha = 0.34f),
+                            topLeft = androidx.compose.ui.geometry.Offset(
+                                thumbX - (thumbW + 8.dp.toPx()) / 2f,
+                                centerY - (thumbH + 12.dp.toPx()) / 2f,
+                            ),
+                            size = androidx.compose.ui.geometry.Size(
+                                thumbW + 8.dp.toPx(),
+                                thumbH + 12.dp.toPx(),
+                            ),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                                (thumbW + 8.dp.toPx()) / 2f,
+                            ),
+                        )
                     }
-                    return centerY + sin(angle) * amplitude
-                }
-                fun snakePath(endX: Float): Path {
-                    val path = Path()
-                    val clampedEnd = endX.coerceIn(0f, size.width)
-                    val step = (size.width / 72f).coerceAtLeast(3f)
-                    path.moveTo(0f, snakeY(0f))
-                    var x = step
-                    while (x < clampedEnd) {
-                        path.lineTo(x, snakeY(x))
-                        x += step
+                    drawRoundRect(
+                        color = style.sliderInactive,
+                        topLeft = androidx.compose.ui.geometry.Offset(0f, trackY),
+                        size = androidx.compose.ui.geometry.Size(size.width, trackH),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(trackH / 2f),
+                    )
+                    if (activeX > 0f) {
+                        drawRoundRect(
+                            brush = Brush.horizontalGradient(
+                                listOf(
+                                    style.primaryContainer,
+                                    style.secondaryContainer.copy(alpha = 1f),
+                                ),
+                            ),
+                            topLeft = androidx.compose.ui.geometry.Offset(0f, trackY),
+                            size = androidx.compose.ui.geometry.Size(activeX, trackH),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(trackH / 2f),
+                        )
+                        // Reflective leading highlight along the top of the played span.
+                        drawRoundRect(
+                            color = Color.White.copy(alpha = 0.30f),
+                            topLeft = androidx.compose.ui.geometry.Offset(
+                                0f,
+                                trackY + trackH * 0.20f,
+                            ),
+                            size = androidx.compose.ui.geometry.Size(activeX, trackH * 0.28f),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(trackH * 0.22f),
+                        )
                     }
-                    path.lineTo(clampedEnd, snakeY(clampedEnd))
-                    return path
-                }
-                val trackGap = if (treatment == ProgressTreatment.EXPRESSIVE) 4.dp.toPx() else 0f
-                drawLine(
-                    color = style.sliderInactive,
-                    start = androidx.compose.ui.geometry.Offset(
-                        (activeX + trackGap).coerceAtMost(size.width),
-                        centerY,
-                    ),
-                    end = androidx.compose.ui.geometry.Offset(size.width, centerY),
-                    strokeWidth = thickness,
-                    cap = androidx.compose.ui.graphics.StrokeCap.Round,
-                )
-                if (activeX > 0f) {
-                    drawPath(
-                        path = snakePath(activeX),
-                        color = style.primaryContainer,
-                        style = androidx.compose.ui.graphics.drawscope.Stroke(
-                            width = if (treatment == ProgressTreatment.EXPRESSIVE) {
-                                thickness
-                            } else {
-                                thickness * 1.12f
-                            },
-                            cap = androidx.compose.ui.graphics.StrokeCap.Round,
-                            join = androidx.compose.ui.graphics.StrokeJoin.Round,
+                    drawRoundRect(
+                        color = style.foreground,
+                        topLeft = androidx.compose.ui.geometry.Offset(
+                            thumbX - thumbW / 2f,
+                            centerY - thumbH / 2f,
                         ),
+                        size = androidx.compose.ui.geometry.Size(thumbW, thumbH),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(thumbW / 2f),
+                    )
+                } else {
+                    // Material 3 Expressive's determinate wavy indicator is flat for
+                    // the first 10% and last 5% of progress, then uses its full wave.
+                    // This keeps the beginning visibly straight while the played
+                    // portion becomes the animated zig-zag.
+                    val waveReveal = if (treatment == ProgressTreatment.EXPRESSIVE) {
+                        expressiveWaveReveal
+                    } else if (treatment == ProgressTreatment.GLASS) {
+                        // Liquid Glass uses Apple's quiet capsule rail; the
+                        // expressive wave belongs only to the M3 treatment.
+                        0f
+                    } else {
+                        ((fraction - 0.01f) / 0.24f).coerceIn(0f, 1f)
+                    }
+                    val amplitude = when (treatment) {
+                        ProgressTreatment.GLASS -> 0f
+                        // M3 Expressive linear wavy indicator token.
+                        ProgressTreatment.EXPRESSIVE -> 4.dp.toPx()
+                        ProgressTreatment.EDITORIAL -> 2.5.dp.toPx()
+                    } * waveReveal * (1f + dragEnergy * 0.35f) * (if (state.isPlaying) 1f else 0f)
+                    val thickness = when (treatment) {
+                        ProgressTreatment.GLASS -> 2.5.dp.toPx()
+                        // M3 Expressive linear indicator active and track thickness.
+                        ProgressTreatment.EXPRESSIVE -> 5.dp.toPx()
+                        ProgressTreatment.EDITORIAL -> 2.dp.toPx()
+                    }
+                    val phase = if (state.isPlaying) waveformPhase else 0f
+                    val cycles = when (treatment) {
+                        ProgressTreatment.GLASS -> 4.5f
+                        ProgressTreatment.EXPRESSIVE -> 5f
+                        ProgressTreatment.EDITORIAL -> 4f
+                    }
+                    val expressiveWavelengthPx = 40.dp.toPx()
+                    fun snakeY(x: Float): Float {
+                        val angle = if (treatment == ProgressTreatment.EXPRESSIVE) {
+                            (x / expressiveWavelengthPx.coerceAtLeast(1f)) *
+                                (Math.PI * 2.0).toFloat() + phase
+                        } else {
+                            (x / size.width.coerceAtLeast(1f)) *
+                                (Math.PI * cycles).toFloat() + phase
+                        }
+                        return centerY + sin(angle) * amplitude
+                    }
+                    fun snakePath(endX: Float): Path {
+                        val path = Path()
+                        val clampedEnd = endX.coerceIn(0f, size.width)
+                        val step = (size.width / 72f).coerceAtLeast(3f)
+                        path.moveTo(0f, snakeY(0f))
+                        var x = step
+                        while (x < clampedEnd) {
+                            path.lineTo(x, snakeY(x))
+                            x += step
+                        }
+                        path.lineTo(clampedEnd, snakeY(clampedEnd))
+                        return path
+                    }
+                    val trackGap = if (treatment == ProgressTreatment.EXPRESSIVE) 4.dp.toPx() else 0f
+                    drawLine(
+                        color = style.sliderInactive,
+                        start = androidx.compose.ui.geometry.Offset(
+                            (activeX + trackGap).coerceAtMost(size.width),
+                            centerY,
+                        ),
+                        end = androidx.compose.ui.geometry.Offset(size.width, centerY),
+                        strokeWidth = thickness,
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                    )
+                    if (activeX > 0f) {
+                        drawPath(
+                            path = snakePath(activeX),
+                            color = style.primaryContainer,
+                            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                width = if (treatment == ProgressTreatment.EXPRESSIVE) {
+                                    thickness
+                                } else {
+                                    thickness * 1.12f
+                                },
+                                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                                join = androidx.compose.ui.graphics.StrokeJoin.Round,
+                            ),
+                        )
+                    }
+                    // ── Vertical capsule thumb ────────────────────────────────────────────
+                    // Sits fixed on the center rail (not riding the wave) so it always reads
+                    // clearly as the scrub handle regardless of waveform amplitude.
+                    val capsuleW = (if (isDragging) 5.dp else 4.dp).toPx()
+                    val capsuleH = (if (isDragging) 22.dp else 18.dp).toPx()
+                    val capsuleX = activeX.coerceIn(capsuleW / 2f, size.width - capsuleW / 2f)
+                    drawRoundRect(
+                        color = style.primaryContainer,
+                        topLeft = androidx.compose.ui.geometry.Offset(
+                            capsuleX - capsuleW / 2f,
+                            centerY - capsuleH / 2f,
+                        ),
+                        size = androidx.compose.ui.geometry.Size(capsuleW, capsuleH),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(capsuleW / 2f),
                     )
                 }
-                // ── Vertical capsule thumb ────────────────────────────────────────────
-                // Sits fixed on the center rail (not riding the wave) so it always reads
-                // clearly as the scrub handle regardless of waveform amplitude.
-                val capsuleW = (if (isDragging) 5.dp else 4.dp).toPx()
-                val capsuleH = (if (isDragging) 22.dp else 18.dp).toPx()
-                val capsuleX = activeX.coerceIn(capsuleW / 2f, size.width - capsuleW / 2f)
-                drawRoundRect(
-                    color = style.primaryContainer,
-                    topLeft = androidx.compose.ui.geometry.Offset(
-                        capsuleX - capsuleW / 2f,
-                        centerY - capsuleH / 2f,
-                    ),
-                    size = androidx.compose.ui.geometry.Size(capsuleW, capsuleH),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(capsuleW / 2f),
-                )
             }
             Slider(
                 value = displayedPosition,
@@ -3915,19 +4005,30 @@ private fun ThemedPositionSection(
             )
         }
         Row(Modifier.fillMaxWidth()) {
+            val timeStyle = when (treatment) {
+                ProgressTreatment.VINYL -> TimeTextStyle.Editorial
+                else -> TimeTextStyle.Compact
+            }
             Text(
                 formatPlaybackTime(displayedPosition.toLong()),
                 color = style.secondaryForeground,
-                fontSize = 12.sp,
+                fontSize = timeStyle.fontSize,
+                fontWeight = timeStyle.fontWeight,
             )
             Spacer(Modifier.weight(1f))
             Text(
                 formatPlaybackTime(state.durationMs),
                 color = style.secondaryForeground,
-                fontSize = 12.sp,
+                fontSize = timeStyle.fontSize,
+                fontWeight = timeStyle.fontWeight,
             )
         }
     }
+}
+
+private enum class TimeTextStyle(val fontSize: androidx.compose.ui.unit.TextUnit, val fontWeight: FontWeight) {
+    Editorial(13.sp, FontWeight.SemiBold),
+    Compact(12.sp, FontWeight.Normal),
 }
 
 @Composable
@@ -4098,6 +4199,26 @@ private fun SourceCapsule(
                 PlaybackSignal(isPlaying = state.isPlaying, color = style.badgeContent)
             }
         }
+    }
+}
+
+/**
+ * Small "now playing" pill used in place of a clock: source app + a live playback
+ * pulse. It anchors the top of a theme without competing with the hero artwork.
+ */
+@Composable
+private fun NowPlayingEyebrow(
+    state: ExternalMediaState,
+    style: PlayerVisualStyle,
+    centered: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    if (state.sourceApp.isBlank()) return
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = if (centered) Arrangement.Center else Arrangement.Start,
+    ) {
+        SourceCapsule(state, style, outlined = true, uppercase = true)
     }
 }
 
